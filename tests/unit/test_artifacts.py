@@ -10,6 +10,7 @@ import pytest
 from nodelm.artifacts import (
     ArtifactCollisionError,
     canonical_json_bytes,
+    file_identity,
     write_immutable_json,
     write_immutable_stream,
 )
@@ -17,6 +18,16 @@ from nodelm.artifacts import (
 
 def test_canonical_json_is_stable_and_newline_terminated() -> None:
     assert canonical_json_bytes({"z": 1, "a": "å"}) == ('{"a":"å","z":1}\n'.encode())
+
+
+def test_file_identity_reports_digest_and_bytes_from_one_read(tmp_path: Path) -> None:
+    path = tmp_path / "input.bin"
+    path.write_bytes(b"snapshot bytes")
+
+    digest, byte_count = file_identity(path)
+
+    assert digest == "ee36ef8194c4dd1e734e6d64f62653008e6566dbd5e2cd7f289f0f4f3e4467a4"
+    assert byte_count == 14
 
 
 def test_immutable_write_is_idempotent(tmp_path: Path) -> None:

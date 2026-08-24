@@ -7,14 +7,19 @@ import os
 import sqlite3
 import tempfile
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 from nodelm.decontamination.fingerprints import canonical_repository
-from nodelm.licenses.gate import LicenseDisposition, evaluate_license
+from nodelm.licenses.gate import LicenseDecision, LicenseDisposition, evaluate_license
 from nodelm.models import (
+    DATASET_AUDIT_V1_SCHEMA,
+    DATASET_AUDIT_V2_SCHEMA,
+    RAW_FILE_IDENTITY_SCHEMA,
+    SNAPSHOT_IDENTITY_SCHEMA,
+    AuditInputIdentitySchema,
     DatasetAuditReport,
     DatasetSource,
     JsonFieldType,
@@ -141,37 +146,53 @@ def _instance_id(row: Mapping[str, Any], fallback: int) -> str:
     return str(fallback if value is None else value)
 
 
+def _license_rejection(
+    *,
+    index: int,
+    row: Mapping[str, Any],
+    instance_id: str,
+    decision: LicenseDecision,
+) -> dict[str, Any]:
+    return {
+        "row_index": index,
+        "instance_id": instance_id,
+        "repository": row.get("repo") or row.get("repository"),
+        "raw_license": row.get("license"),
+        "disposition": decision.disposition.value,
+        "reason": decision.reason,
+    }
+
+
 def iter_license_rejections(
     rows: Iterable[Mapping[str, Any]],
 ) -> Iterator[dict[str, Any]]:
     """Yield the complete repository-license rejection ledger for a raw row stream."""
 
     for index, row in enumerate(rows):
-        raw_repository = row.get("repo") or row.get("repository")
         instance_id = _instance_id(row, index)
         raw_license = row.get("license")
         decision = evaluate_license(raw_license if isinstance(raw_license, str) else None)
         if decision.disposition is not LicenseDisposition.ALLOW:
-            yield {
-                "row_index": index,
-                "instance_id": instance_id,
-                "repository": raw_repository,
-                "raw_license": raw_license,
-                "disposition": decision.disposition.value,
-                "reason": decision.reason,
-            }
+            yield _license_rejection(
+                index=index,
+                row=row,
+                instance_id=instance_id,
+                decision=decision,
+            )
 
 
 def audit_rows(
     source: DatasetSource,
     rows: Iterable[Mapping[str, Any]],
     *,
+    input_identity_schema: AuditInputIdentitySchema = RAW_FILE_IDENTITY_SCHEMA,
     input_sha256: str | None = None,
     input_bytes: int | None = None,
     max_rejected_examples: int = DEFAULT_MAX_REJECTED_EXAMPLES,
     max_distribution_samples: int = DEFAULT_MAX_DISTRIBUTION_SAMPLES,
     max_duplicate_examples: int = DEFAULT_MAX_DUPLICATE_EXAMPLES,
     expect_complete_snapshot: bool = True,
+    rejection_sink: Callable[[dict[str, Any]], object] | None = None,
 ) -> DatasetAuditReport:
     if (input_sha256 is None) != (input_bytes is None):
         raise ValueError("input_sha256 and input_bytes must be supplied together")
@@ -246,17 +267,16 @@ def audit_rows(
             licenses[decision.disposition.value] += 1
             if decision.disposition is not LicenseDisposition.ALLOW:
                 rejected_row_count += 1
+                rejection = _license_rejection(
+                    index=index,
+                    row=row,
+                    instance_id=instance_id,
+                    decision=decision,
+                )
                 if len(rejected_rows) < max_rejected_examples:
-                    rejected_rows.append(
-                        {
-                            "row_index": index,
-                            "instance_id": instance_id,
-                            "repository": raw_repository,
-                            "raw_license": raw_license,
-                            "disposition": decision.disposition.value,
-                            "reason": decision.reason,
-                        }
-                    )
+                    rejected_rows.append(rejection)
+                if rejection_sink is not None:
+                    rejection_sink(dict(rejection))
 
         repository_row = identities.execute("SELECT COUNT(*) FROM repositories").fetchone()
         duplicate_row = identities.execute(
@@ -286,6 +306,11 @@ def audit_rows(
         issues.append("no repository identity found in audited rows")
 
     return DatasetAuditReport(
+        schema_version=(
+            DATASET_AUDIT_V2_SCHEMA
+            if input_identity_schema == SNAPSHOT_IDENTITY_SCHEMA
+            else DATASET_AUDIT_V1_SCHEMA
+        ),
         status=(
             VerificationStatus.FAIL
             if issues
@@ -298,6 +323,7 @@ def audit_rows(
         source_name=source.name,
         source_repository_id=source.repository_id,
         source_revision=source.revision,
+        input_identity_schema=input_identity_schema,
         input_sha256=input_sha256,
         input_bytes=input_bytes,
         input_scope="complete-snapshot" if expect_complete_snapshot else "partial-snapshot",

@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from nodelm.artifacts import canonical_json_bytes
 from nodelm.cli import app
+from nodelm.datasets.lineage import (
+    DatasetSnapshotTransferReceipt,
+    capture_snapshot_identity,
+)
 from nodelm.harness import CommandResult, OutcomeCategory
 from nodelm.models import NormalizedSample
 
@@ -421,6 +426,7 @@ def test_large_download_allows_new_or_empty_destination(
     destination_exists: bool,
 ) -> None:
     destination = tmp_path / "data"
+    receipt_output = tmp_path / "data.transfer.json"
     if destination_exists:
         destination.mkdir()
     download_called = False
@@ -428,6 +434,11 @@ def test_large_download_allows_new_or_empty_destination(
     def fake_download(*args: object, **kwargs: object) -> Path:
         nonlocal download_called
         download_called = True
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "snapshot.jsonl").write_text(
+            '{"instance_id":"synthetic"}\n',
+            encoding="utf-8",
+        )
         return destination
 
     monkeypatch.setattr("nodelm.cli.download_pinned_snapshot", fake_download)
@@ -442,11 +453,68 @@ def test_large_download_allows_new_or_empty_destination(
             "--destination",
             str(destination),
             "--confirm-large-download",
+            "--receipt-output",
+            str(receipt_output),
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert download_called is True
+    receipt = DatasetSnapshotTransferReceipt.model_validate_json(
+        receipt_output.read_text(encoding="utf-8")
+    )
+    assert receipt.snapshot_scope == "complete"
+    assert receipt.allow_patterns == ()
+    assert receipt.snapshot == capture_snapshot_identity(destination)
+    assert receipt.source.name == "open-swe-traces"
+    assert canonical_json_bytes(receipt.model_dump(mode="json")) == receipt_output.read_bytes()
+
+
+def test_filtered_download_receipt_records_exact_requested_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "data"
+    receipt_output = tmp_path / "filtered.transfer.json"
+    observed_patterns: tuple[str, ...] | None = None
+
+    def fake_download(*args: object, **kwargs: object) -> Path:
+        nonlocal observed_patterns
+        patterns = kwargs["allow_patterns"]
+        assert isinstance(patterns, tuple)
+        assert all(isinstance(pattern, str) for pattern in patterns)
+        observed_patterns = patterns
+        destination.mkdir()
+        (destination / "snapshot.jsonl").write_text("{}\n", encoding="utf-8")
+        return destination
+
+    monkeypatch.setattr("nodelm.cli.download_pinned_snapshot", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "download",
+            "--source",
+            "open-swe-traces",
+            "--destination",
+            str(destination),
+            "--allow-pattern",
+            "**/*.jsonl",
+            "--confirm-large-download",
+            "--receipt-output",
+            str(receipt_output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = DatasetSnapshotTransferReceipt.model_validate_json(
+        receipt_output.read_text(encoding="utf-8")
+    )
+    assert observed_patterns == ("**/*.jsonl",)
+    assert receipt.snapshot_scope == "filtered"
+    assert receipt.allow_patterns == ("**/*.jsonl",)
+    assert receipt.snapshot == capture_snapshot_identity(destination)
 
 
 def test_unresolved_model_and_training_commands_report_honest_statuses() -> None:

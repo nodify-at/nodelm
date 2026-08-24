@@ -23,9 +23,19 @@ class DatasetRegistry:
     @classmethod
     def load(cls, path: Path) -> DatasetRegistry:
         try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as error:
+            payload = path.read_bytes()
+        except OSError as error:
             raise RegistryError(f"unable to read dataset registry {path}: {error}") from error
+        return cls.from_bytes(payload)
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> DatasetRegistry:
+        """Parse the exact registry bytes whose identity a caller can bind separately."""
+
+        try:
+            raw = yaml.safe_load(payload)
+        except (UnicodeError, yaml.YAMLError) as error:
+            raise RegistryError(f"unable to parse dataset registry: {error}") from error
 
         if not isinstance(raw, dict):
             raise RegistryError("dataset registry root must be a mapping")

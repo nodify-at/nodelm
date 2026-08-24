@@ -11,13 +11,21 @@ from nodelm.datasets.audit import audit_rows
 from nodelm.datasets.lineage import (
     DatasetLineageManifest,
     DatasetSnapshotIdentity,
+    DatasetSnapshotTransferReceipt,
     DeferredAuditChecks,
     SnapshotFileIdentity,
     build_dataset_lineage_manifest,
+    build_snapshot_transfer_receipt,
     capture_snapshot_identity,
     verify_snapshot_identity,
 )
-from nodelm.models import DatasetAuditReport, DatasetSource, VerificationStatus
+from nodelm.models import (
+    RAW_FILE_IDENTITY_SCHEMA,
+    SNAPSHOT_IDENTITY_SCHEMA,
+    DatasetAuditReport,
+    DatasetSource,
+    VerificationStatus,
+)
 
 
 def _source(*, observed_rows: int = 2) -> DatasetSource:
@@ -70,6 +78,7 @@ def _report_with_ledger(
         ),
         input_sha256=snapshot.snapshot_sha256,
         input_bytes=snapshot.snapshot_bytes,
+        input_identity_schema=SNAPSHOT_IDENTITY_SCHEMA,
     )
     return DatasetAuditReport.model_validate(
         {
@@ -85,13 +94,30 @@ def _build_manifest(
     source: DatasetSource,
     snapshot: DatasetSnapshotIdentity,
     report: DatasetAuditReport,
+    *,
+    transfer_receipt: DatasetSnapshotTransferReceipt | None = None,
+    transfer_receipt_sha256: str | None = None,
+    transfer_receipt_bytes: int | None = None,
 ) -> DatasetLineageManifest:
+    receipt = transfer_receipt or build_snapshot_transfer_receipt(
+        source=source,
+        registry_sha256="b" * 64,
+        registry_bytes=123,
+        snapshot=snapshot,
+    )
+    receipt_bytes = canonical_json_bytes(receipt.model_dump(mode="json"))
     report_sha256 = content_digest(canonical_json_bytes(report.model_dump(mode="json")))
     return build_dataset_lineage_manifest(
         source=source,
         registry_sha256="b" * 64,
         registry_bytes=123,
         snapshot=snapshot,
+        transfer_receipt=receipt,
+        transfer_receipt_artifact="snapshot.transfer.json",
+        transfer_receipt_sha256=transfer_receipt_sha256 or content_digest(receipt_bytes),
+        transfer_receipt_bytes=(
+            len(receipt_bytes) if transfer_receipt_bytes is None else transfer_receipt_bytes
+        ),
         report=report,
         audit_artifact="audit.json",
         audit_sha256=report_sha256,
@@ -165,6 +191,68 @@ def test_snapshot_verification_detects_file_set_and_content_drift(tmp_path: Path
         verify_snapshot_identity(root, identity)
 
 
+def test_transfer_receipt_binds_complete_snapshot_to_pinned_registry_source(
+    tmp_path: Path,
+) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+    source = _source()
+
+    receipt = build_snapshot_transfer_receipt(
+        source=source,
+        registry_sha256="b" * 64,
+        registry_bytes=123,
+        snapshot=snapshot,
+    )
+
+    assert receipt.source == source
+    assert receipt.registry_sha256 == "b" * 64
+    assert receipt.registry_bytes == 123
+    assert receipt.snapshot_scope == "complete"
+    assert receipt.allow_patterns == ()
+    assert receipt.snapshot == snapshot
+
+
+@pytest.mark.parametrize(
+    ("snapshot_scope", "allow_patterns", "message"),
+    (
+        ("complete", ("data/*.jsonl",), "complete"),
+        ("filtered", (), "filtered"),
+        ("filtered", ("z/*.jsonl", "a/*.jsonl"), "sorted"),
+        ("filtered", ("a/*.jsonl", "a/*.jsonl"), "unique"),
+    ),
+)
+def test_transfer_receipt_rejects_inconsistent_scope_and_patterns(
+    tmp_path: Path,
+    snapshot_scope: str,
+    allow_patterns: tuple[str, ...],
+    message: str,
+) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+
+    with pytest.raises((ValidationError, ValueError), match=message):
+        build_snapshot_transfer_receipt(
+            source=_source(),
+            registry_sha256="b" * 64,
+            registry_bytes=123,
+            snapshot=snapshot,
+            snapshot_scope=snapshot_scope,  # type: ignore[arg-type]
+            allow_patterns=allow_patterns,
+        )
+
+
+def test_transfer_receipt_rejects_source_without_registry_pass(tmp_path: Path) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+    source = _source().model_copy(update={"status": VerificationStatus.UNVERIFIED})
+
+    with pytest.raises((ValidationError, ValueError), match="registry-PASS pinned source"):
+        build_snapshot_transfer_receipt(
+            source=source,
+            registry_sha256="b" * 64,
+            registry_bytes=123,
+            snapshot=snapshot,
+        )
+
+
 def test_lineage_builder_binds_complete_canonical_audit_and_ledger(tmp_path: Path) -> None:
     snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
     source = _source()
@@ -175,8 +263,12 @@ def test_lineage_builder_binds_complete_canonical_audit_and_ledger(tmp_path: Pat
     assert manifest.status is VerificationStatus.PASS
     assert manifest.source == source
     assert manifest.snapshot == snapshot
+    assert manifest.transfer_receipt_artifact == "snapshot.transfer.json"
+    assert len(manifest.transfer_receipt_sha256) == 64
+    assert manifest.transfer_receipt_bytes > 0
     assert manifest.audit_row_count == 2
     assert manifest.audit_logical_rows_sha256 == report.logical_rows_sha256
+    assert report.schema_version == "nodelm.dataset-audit/v2"
     assert manifest.deferred_checks == DeferredAuditChecks()
     assert set(manifest.deferred_checks.model_dump(mode="json").values()) == {"NOT RUN"}
 
@@ -185,6 +277,8 @@ def test_lineage_builder_binds_complete_canonical_audit_and_ledger(tmp_path: Pat
     ("update", "message"),
     (
         ({"input_scope": "partial-snapshot"}, "complete-snapshot"),
+        ({"schema_version": "nodelm.dataset-audit/v1"}, "v2 aggregate snapshot"),
+        ({"input_identity_schema": RAW_FILE_IDENTITY_SCHEMA}, "aggregate snapshot identity"),
         ({"input_sha256": "f" * 64}, "snapshot identity"),
         ({"source_revision": "f" * 40}, "source identity"),
         ({"rejection_ledger_sha256": "f" * 64}, "rejection ledger"),
@@ -215,10 +309,86 @@ def test_lineage_builder_accepts_truthful_row_drift_failure(tmp_path: Path) -> N
     assert manifest.audit_row_count == 2
 
 
+@pytest.mark.parametrize(
+    ("receipt_update", "message"),
+    (
+        ({"source": _source().model_copy(update={"name": "other"})}, "source"),
+        ({"registry_sha256": "f" * 64}, "registry"),
+        ({"registry_bytes": 999}, "registry"),
+        ({"snapshot_scope": "filtered", "allow_patterns": ("data/*.jsonl",)}, "complete"),
+    ),
+)
+def test_lineage_builder_rejects_transfer_receipt_cross_artifact_mismatch(
+    tmp_path: Path,
+    receipt_update: dict[str, object],
+    message: str,
+) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+    source = _source()
+    report = _report_with_ledger(source, snapshot)
+    receipt = build_snapshot_transfer_receipt(
+        source=source,
+        registry_sha256="b" * 64,
+        registry_bytes=123,
+        snapshot=snapshot,
+    ).model_copy(update=receipt_update)
+
+    with pytest.raises(ValueError, match=message):
+        _build_manifest(source, snapshot, report, transfer_receipt=receipt)
+
+
+def test_lineage_builder_rejects_transfer_receipt_snapshot_mismatch(tmp_path: Path) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+    other_root = _write_snapshot(tmp_path / "other-snapshot")
+    (other_root / "z.jsonl").write_text("{}\n", encoding="utf-8")
+    other_snapshot = capture_snapshot_identity(other_root)
+    source = _source()
+    report = _report_with_ledger(source, snapshot)
+    receipt = build_snapshot_transfer_receipt(
+        source=source,
+        registry_sha256="b" * 64,
+        registry_bytes=123,
+        snapshot=other_snapshot,
+    )
+
+    with pytest.raises(ValueError, match="receipt snapshot identity"):
+        _build_manifest(source, snapshot, report, transfer_receipt=receipt)
+
+
+@pytest.mark.parametrize(
+    ("receipt_sha256", "receipt_bytes"),
+    (("f" * 64, None), (None, 1)),
+)
+def test_lineage_builder_rejects_noncanonical_transfer_receipt_identity(
+    tmp_path: Path,
+    receipt_sha256: str | None,
+    receipt_bytes: int | None,
+) -> None:
+    snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
+    source = _source()
+    report = _report_with_ledger(source, snapshot)
+
+    with pytest.raises(ValueError, match="receipt artifact identity"):
+        _build_manifest(
+            source,
+            snapshot,
+            report,
+            transfer_receipt_sha256=receipt_sha256,
+            transfer_receipt_bytes=receipt_bytes,
+        )
+
+
 def test_lineage_builder_rejects_noncanonical_report_digest(tmp_path: Path) -> None:
     snapshot = capture_snapshot_identity(_write_snapshot(tmp_path / "snapshot"))
     source = _source()
     report = _report_with_ledger(source, snapshot)
+    receipt = build_snapshot_transfer_receipt(
+        source=source,
+        registry_sha256="b" * 64,
+        registry_bytes=123,
+        snapshot=snapshot,
+    )
+    receipt_bytes = canonical_json_bytes(receipt.model_dump(mode="json"))
 
     with pytest.raises(ValueError, match="canonical audit report digest"):
         build_dataset_lineage_manifest(
@@ -226,6 +396,10 @@ def test_lineage_builder_rejects_noncanonical_report_digest(tmp_path: Path) -> N
             registry_sha256="b" * 64,
             registry_bytes=123,
             snapshot=snapshot,
+            transfer_receipt=receipt,
+            transfer_receipt_artifact="snapshot.transfer.json",
+            transfer_receipt_sha256=content_digest(receipt_bytes),
+            transfer_receipt_bytes=len(receipt_bytes),
             report=report,
             audit_artifact="audit.json",
             audit_sha256="f" * 64,

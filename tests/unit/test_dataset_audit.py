@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from nodelm.datasets.audit import audit_rows
-from nodelm.models import DatasetSource, VerificationStatus
+from nodelm.models import (
+    RAW_FILE_IDENTITY_SCHEMA,
+    SNAPSHOT_IDENTITY_SCHEMA,
+    DatasetAuditReport,
+    DatasetSource,
+    VerificationStatus,
+)
 from nodelm.provenance.normalize import NormalizationError
 
 
@@ -185,6 +191,29 @@ def test_audit_bounds_rejection_examples_but_counts_every_rejection() -> None:
     assert report.rejected_rows_truncated is True
 
 
+def test_audit_streams_every_rejection_to_a_sink() -> None:
+    streamed: list[dict[str, object]] = []
+    rows = tuple(
+        {
+            "instance_id": f"row-{index}",
+            "repo": "acme/widget",
+            "license": "GPL-3.0",
+        }
+        for index in range(3)
+    )
+
+    report = audit_rows(
+        _source(),
+        rows,
+        max_rejected_examples=1,
+        rejection_sink=streamed.append,
+    )
+
+    assert report.rejected_row_count == 3
+    assert len(report.rejected_rows) == 1
+    assert [row["instance_id"] for row in streamed] == ["row-0", "row-1", "row-2"]
+
+
 def test_audit_bounds_distribution_samples_and_labels_approximate_percentiles() -> None:
     report = audit_rows(
         _source(),
@@ -240,7 +269,86 @@ def test_audit_records_supplied_input_identity_and_stable_logical_identity() -> 
 
     assert first.input_sha256 == "b" * 64
     assert first.input_bytes == 123
+    assert first.schema_version == "nodelm.dataset-audit/v1"
+    assert first.input_identity_schema == RAW_FILE_IDENTITY_SCHEMA
+    assert "input_identity_schema" not in first.model_dump(mode="json")
     assert first.logical_rows_sha256 == second.logical_rows_sha256
+
+
+def test_audit_report_legacy_payload_defaults_to_raw_file_identity() -> None:
+    report = audit_rows(_source(), ())
+    legacy_payload = report.model_dump(mode="json")
+
+    restored = DatasetAuditReport.model_validate(legacy_payload)
+
+    assert restored.input_identity_schema == RAW_FILE_IDENTITY_SCHEMA
+    assert restored.schema_version == "nodelm.dataset-audit/v1"
+    assert "input_identity_schema" not in restored.model_dump(mode="json")
+
+
+def test_audit_records_explicit_aggregate_snapshot_identity() -> None:
+    report = audit_rows(
+        _source(),
+        (),
+        input_sha256="b" * 64,
+        input_bytes=123,
+        input_identity_schema=SNAPSHOT_IDENTITY_SCHEMA,
+    )
+
+    assert report.schema_version == "nodelm.dataset-audit/v2"
+    assert report.input_identity_schema == SNAPSHOT_IDENTITY_SCHEMA
+    assert report.model_dump(mode="json")["input_identity_schema"] == SNAPSHOT_IDENTITY_SCHEMA
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    (
+        (
+            {
+                "schema_version": "nodelm.dataset-audit/v1",
+                "input_identity_schema": SNAPSHOT_IDENTITY_SCHEMA,
+                "input_sha256": "b" * 64,
+                "input_bytes": 123,
+            },
+            "v1 audit reports require raw-file identity",
+        ),
+        (
+            {
+                "schema_version": "nodelm.dataset-audit/v2",
+                "input_identity_schema": RAW_FILE_IDENTITY_SCHEMA,
+            },
+            "v2 audit reports require aggregate snapshot identity",
+        ),
+        (
+            {
+                "schema_version": "nodelm.dataset-audit/v2",
+                "input_identity_schema": SNAPSHOT_IDENTITY_SCHEMA,
+                "input_sha256": None,
+                "input_bytes": None,
+            },
+            "aggregate snapshot identity requires input_sha256 and input_bytes",
+        ),
+        (
+            {
+                "schema_version": "nodelm.dataset-audit/v2",
+                "input_identity_schema": SNAPSHOT_IDENTITY_SCHEMA,
+                "input_sha256": "b" * 64,
+                "input_bytes": 123,
+                "input_scope": "partial-snapshot",
+            },
+            "aggregate snapshot identity requires complete-snapshot scope",
+        ),
+    ),
+)
+def test_audit_report_rejects_invalid_versioned_input_identity_semantics(
+    update: dict[str, object],
+    message: str,
+) -> None:
+    payload = audit_rows(_source(), ()).model_dump(mode="json")
+    payload.update(update)
+
+    with pytest.raises(ValueError, match=message):
+        DatasetAuditReport.model_validate(payload)
 
 
 @pytest.mark.parametrize("resolved", ["false", "true", 2])

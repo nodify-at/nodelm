@@ -44,3 +44,18 @@ def test_snapshot_discovery_fails_when_no_supported_data_exists(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="no supported data files"):
         discover_snapshot_files(tmp_path)
+
+
+def test_snapshot_discovery_rejects_supported_symlink_outside_root(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    linked = snapshot / "linked.jsonl"
+    try:
+        linked.symlink_to(outside)
+    except (NotImplementedError, OSError) as error:  # pragma: no cover - platform capability
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    with pytest.raises(ValueError, match="resolves outside snapshot"):
+        discover_snapshot_files(snapshot)

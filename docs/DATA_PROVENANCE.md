@@ -8,9 +8,15 @@ feeds the repository split without a parallel hand-built identity file.
 
 The normalization flow is:
 
-1. Verify the registry record and immutable source revision.
+1. Verify the registry record and immutable source revision. The guarded download publishes an
+   immutable transfer receipt that joins that source and raw registry identity to the complete
+   supported local snapshot inventory.
 2. Audit the raw snapshot before filtering; retain schema, counts, bounded distribution
-   samples, duplicate IDs, and a complete streamed license-rejection ledger.
+   samples, duplicate IDs, and a complete streamed license-rejection ledger. For a local
+   complete snapshot, require its complete transfer receipt, copy the receipt-bound files into a
+   private staged view, publish a `nodelm.dataset-audit/v2` report that declares the aggregate
+   identity algorithm, and publish a source-level lineage manifest that binds the receipt,
+   registry, snapshot, logical rows, report, and ledger. Legacy raw-file audits remain v1.
 3. Materialize pinned Parquet/JSONL files without loading the snapshot into memory, then
    normalize only records that satisfy the required provenance contract. When Open-SWE traces
    lack base metadata, the disk-backed join copies only repository, base commit, license, and
@@ -33,8 +39,15 @@ uses a disk-backed index and streams canonical JSON; its repository-list reader 
 per-sample assignments. The split manifest contains source digests and typed exact/near
 comparison, match, overlap, group, and exclusion counts, but no raw task or patch text. The
 public benchmark and strictly positive near-duplicate threshold are mandatory CLI inputs because
-the unavailable source plan cannot be replaced with guessed values. The convenience in-memory
-Python API has an explicit row limit.
+the plan leaves both the benchmark inputs and measured threshold unfrozen, so they cannot be
+guessed. The convenience in-memory Python API has an explicit row limit.
+
+The source-level lineage status covers the core local snapshot audit only. The current
+`trajectory_lengths` report measures trajectory steps, not tokenizer tokens. Unique issue/PR
+counts, harness and generating-model distributions, tokenizer-based lengths, exact/near patch
+duplication, and public-evaluation overlap remain explicitly `NOT RUN`; synthetic fixture
+evidence is not a real-source audit. Per-example lineage is added later by strict normalized
+samples and remains distinct from this source-level artifact binding.
 
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

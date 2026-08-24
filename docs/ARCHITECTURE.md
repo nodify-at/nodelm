@@ -6,7 +6,7 @@ stable operator entry points but contain no research logic.
 ## Boundaries
 
 - `datasets`: pinned-source registry, Hub verification, streamed snapshot materialization,
-  audits, and pilot filtering.
+  content-bound snapshot audits/lineage, and pilot filtering.
 - `provenance`: strict normalization into versioned, training-visible sample records with an
   optional disk-backed safe-field task join.
 - `licenses`: conservative repository-level V1 policy; decisions remain auditable.
@@ -32,7 +32,17 @@ Canonical JSON uses sorted keys, compact separators, UTF-8, and a final newline.
 atomic, immutable, and stream-capable: a deterministic path may be reused only for identical
 bytes. Stable IDs derive from canonical inputs; timestamps are evidence metadata, not logical
 identity. Dataset audits bound percentile/rejection examples while streaming the complete
-rejection ledger; repository splitting uses a disk-backed index.
+rejection ledger; repository splitting uses a disk-backed index. Complete-snapshot identity
+covers normalized sorted relative paths plus the bytes and digest of every supported `.jsonl`
+and `.parquet` file discovered below the supplied local path—not arbitrary repository metadata.
+The guarded download records a transfer receipt that joins the pinned source and registry bytes
+to that aggregate; a filtered receipt cannot authorize a complete audit. Offline audit first
+copies those exact files into a private staged view and parses only the verified staged bytes,
+closing the source-path gap between hashing and row decoding. Legacy raw-file audit reports retain
+the `nodelm.dataset-audit/v1` shape; complete aggregate-snapshot reports use
+`nodelm.dataset-audit/v2` and name their identity scheme. The lineage manifest binds the receipt,
+registry, snapshot, logical rows, canonical report, and ledger. Inputs and published dependencies
+are revalidated once at each immutable publication boundary, and lineage is published last.
 
 Parquet datasets must also record a logical row digest because byte identity can vary with the
 writer version. Generated data, weights, and checkpoints stay outside Git.
@@ -49,3 +59,7 @@ bind, has no network, drops capabilities, runs as an unprivileged user with boun
 CPU/memory/PIDs/file resources, and is force-removed even after timeout or cancellation. Patch
 input is bounded and text-only. Generic protected paths reject symlink components before test
 execution.
+
+The snapshot audit's unpredictable private staging directory isolates parsing from ordinary
+changes to the original download path. It is a trusted-local, same-account boundary—not a
+security sandbox against a hostile process already running as the same OS user.

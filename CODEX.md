@@ -31,6 +31,18 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   with larger storage. Metadata checks, contracts, and preflight preparation are allowed, but
   do not start a full snapshot transfer or bulk materialization without explicit confirmation
   in the current session. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` on the future host.
+- Treat `complete-snapshot` as an input-scope claim: it covers all supported JSONL/Parquet data
+  files discovered at the supplied local path. It does not mean the plan's Phase 0 is complete,
+  and a synthetic fixture `PASS` is never a real-source audit or lineage result.
+- Require the guarded download's immutable transfer receipt before assigning a pinned source to
+  local snapshot bytes. The receipt binds the source revision, registry identity, and supported
+  snapshot inventory; filtered-transfer receipts cannot authorize a complete-snapshot audit.
+- Audit only a private staged copy whose identity exactly matches the transfer receipt. Preserve
+  legacy raw-file reports as `nodelm.dataset-audit/v1`; use `nodelm.dataset-audit/v2` only for
+  complete aggregate-snapshot identity. Keep lineage bound to the receipt, registry, snapshot,
+  logical rows, report, and complete rejection ledger; revalidate once at each immutable
+  publication boundary and publish lineage last. Treat the private stage as same-account process
+  isolation, not as a security sandbox against a hostile process running under the same OS user.
 - Keep the project hardware-agnostic. Hardware-specific configuration belongs under
   `configs/infra/`, not in core dataset or harness logic.
 
@@ -55,7 +67,8 @@ evidence that training, evaluation, or a benchmark succeeded.
 ## Repository conventions
 
 - Python support: the locked Python 3.11 minor; strict typing; Ruff; mypy; pytest.
-- Domain schemas belong in `src/nodelm/models.py`; I/O adapters must not weaken them.
+- Domain schemas are strict Pydantic models colocated with their owning domain; I/O adapters
+  must not weaken them.
 - External commands go through the harness executor and its policy—never raw interpolated
   shell strings.
 - Generated artifacts are written atomically below `artifacts/` with deterministic names,

@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from enum import Enum, StrEnum
-from typing import Any, Literal
+from typing import Any, Final, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,6 +18,19 @@ class VerificationStatus(StrEnum):
 
 
 JsonFieldType = Literal["array", "boolean", "integer", "null", "number", "object", "string"]
+
+RAW_FILE_IDENTITY_SCHEMA: Final = "nodelm.raw-file-identity/v1"
+SNAPSHOT_IDENTITY_SCHEMA: Final = "nodelm.dataset-snapshot-identity/v1"
+DATASET_AUDIT_V1_SCHEMA: Final = "nodelm.dataset-audit/v1"
+DATASET_AUDIT_V2_SCHEMA: Final = "nodelm.dataset-audit/v2"
+AuditInputIdentitySchema: TypeAlias = Literal[
+    "nodelm.raw-file-identity/v1",
+    "nodelm.dataset-snapshot-identity/v1",
+]
+DatasetAuditSchemaVersion: TypeAlias = Literal[
+    "nodelm.dataset-audit/v1",
+    "nodelm.dataset-audit/v2",
+]
 
 
 class DatasetSource(BaseModel):
@@ -124,11 +137,15 @@ class CheckResult(BaseModel):
 class DatasetAuditReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["nodelm.dataset-audit/v1"] = "nodelm.dataset-audit/v1"
+    schema_version: DatasetAuditSchemaVersion = DATASET_AUDIT_V1_SCHEMA
     status: VerificationStatus
     source_name: str
     source_repository_id: str
     source_revision: str | None
+    input_identity_schema: AuditInputIdentitySchema = Field(
+        default=RAW_FILE_IDENTITY_SCHEMA,
+        exclude_if=lambda value: value == RAW_FILE_IDENTITY_SCHEMA,
+    )
     input_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     input_bytes: int | None = Field(default=None, ge=0)
     input_scope: Literal["complete-snapshot", "partial-snapshot"]
@@ -162,6 +179,23 @@ class DatasetAuditReport(BaseModel):
     def input_identity_is_complete(self) -> DatasetAuditReport:
         if (self.input_sha256 is None) != (self.input_bytes is None):
             raise ValueError("input_sha256 and input_bytes must be supplied together")
+        if (
+            self.schema_version == DATASET_AUDIT_V1_SCHEMA
+            and self.input_identity_schema != RAW_FILE_IDENTITY_SCHEMA
+        ):
+            raise ValueError("v1 audit reports require raw-file identity")
+        if (
+            self.schema_version == DATASET_AUDIT_V2_SCHEMA
+            and self.input_identity_schema != SNAPSHOT_IDENTITY_SCHEMA
+        ):
+            raise ValueError("v2 audit reports require aggregate snapshot identity")
+        if self.input_identity_schema == SNAPSHOT_IDENTITY_SCHEMA:
+            if self.input_sha256 is None or self.input_bytes is None:
+                raise ValueError(
+                    "aggregate snapshot identity requires input_sha256 and input_bytes"
+                )
+            if self.input_scope != "complete-snapshot":
+                raise ValueError("aggregate snapshot identity requires complete-snapshot scope")
         if self.rejected_rows_truncated != (self.rejected_row_count > len(self.rejected_rows)):
             raise ValueError("rejected row truncation metadata is inconsistent")
         if self.duplicate_instance_ids_truncated != (

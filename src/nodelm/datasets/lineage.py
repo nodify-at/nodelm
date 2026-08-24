@@ -1,17 +1,23 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path, PurePosixPath
-from typing import Final, Literal
+from typing import Final, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from nodelm.artifacts import canonical_json_bytes, content_digest
+from nodelm.artifacts import canonical_json_bytes, content_digest, file_identity
 from nodelm.datasets.materialize import discover_snapshot_files
-from nodelm.models import DatasetAuditReport, DatasetSource, VerificationStatus
+from nodelm.models import (
+    DATASET_AUDIT_V2_SCHEMA,
+    SNAPSHOT_IDENTITY_SCHEMA,
+    DatasetAuditReport,
+    DatasetSource,
+    VerificationStatus,
+)
 
-SNAPSHOT_IDENTITY_SCHEMA: Final = "nodelm.dataset-snapshot-identity/v1"
+SNAPSHOT_TRANSFER_RECEIPT_SCHEMA: Final = "nodelm.dataset-snapshot-transfer/v1"
 LINEAGE_MANIFEST_SCHEMA: Final = "nodelm.dataset-lineage/v1"
+SnapshotScope: TypeAlias = Literal["complete", "filtered"]
 
 
 class SnapshotFileIdentity(BaseModel):
@@ -76,6 +82,43 @@ class DatasetSnapshotIdentity(BaseModel):
         return self
 
 
+class DatasetSnapshotTransferReceipt(BaseModel):
+    """Immutable evidence binding a local snapshot to its pinned registry source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["nodelm.dataset-snapshot-transfer/v1"] = (
+        SNAPSHOT_TRANSFER_RECEIPT_SCHEMA
+    )
+    source: DatasetSource
+    registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registry_bytes: int = Field(ge=0)
+    snapshot_scope: SnapshotScope
+    allow_patterns: tuple[str, ...] = ()
+    snapshot: DatasetSnapshotIdentity
+
+    @field_validator("allow_patterns")
+    @classmethod
+    def require_canonical_allow_patterns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not pattern or pattern != pattern.strip() or "\x00" in pattern for pattern in value):
+            raise ValueError("allow patterns must be non-empty normalized strings")
+        if len(value) != len(set(value)):
+            raise ValueError("allow patterns must be unique")
+        if value != tuple(sorted(value)):
+            raise ValueError("allow patterns must be strictly sorted")
+        return value
+
+    @model_validator(mode="after")
+    def verify_transfer_scope(self) -> DatasetSnapshotTransferReceipt:
+        if self.source.status is not VerificationStatus.PASS or self.source.revision is None:
+            raise ValueError("snapshot transfer requires a registry-PASS pinned source")
+        if self.snapshot_scope == "complete" and self.allow_patterns:
+            raise ValueError("complete snapshot transfers cannot use allow patterns")
+        if self.snapshot_scope == "filtered" and not self.allow_patterns:
+            raise ValueError("filtered snapshot transfers require at least one allow pattern")
+        return self
+
+
 class DeferredAuditChecks(BaseModel):
     """Phase 0 checks that need later tokenizer/benchmark policy decisions."""
 
@@ -86,6 +129,9 @@ class DeferredAuditChecks(BaseModel):
         VerificationStatus.NOT_RUN
     )
     public_evaluation_overlap: Literal[VerificationStatus.NOT_RUN] = VerificationStatus.NOT_RUN
+    unique_issue_or_pr_counts: Literal[VerificationStatus.NOT_RUN] = VerificationStatus.NOT_RUN
+    harness_distribution: Literal[VerificationStatus.NOT_RUN] = VerificationStatus.NOT_RUN
+    generating_model_distribution: Literal[VerificationStatus.NOT_RUN] = VerificationStatus.NOT_RUN
 
 
 class DatasetLineageManifest(BaseModel):
@@ -99,6 +145,9 @@ class DatasetLineageManifest(BaseModel):
     registry_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_bytes: int = Field(ge=0)
     snapshot: DatasetSnapshotIdentity
+    transfer_receipt_artifact: str = Field(min_length=1)
+    transfer_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transfer_receipt_bytes: int = Field(ge=0)
     audit_artifact: str = Field(min_length=1)
     audit_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     audit_row_count: int = Field(ge=0)
@@ -124,16 +173,6 @@ class DatasetLineageManifest(BaseModel):
         return self
 
 
-def _file_identity(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-            byte_count += len(chunk)
-    return digest.hexdigest(), byte_count
-
-
 def capture_snapshot_identity(snapshot: Path) -> DatasetSnapshotIdentity:
     """Capture every supported snapshot file without retaining an absolute root."""
 
@@ -147,7 +186,7 @@ def capture_snapshot_identity(snapshot: Path) -> DatasetSnapshotIdentity:
             bytes=byte_count,
         )
         for path in files
-        for digest, byte_count in (_file_identity(path),)
+        for digest, byte_count in (file_identity(path),)
     )
     if discover_snapshot_files(resolved_snapshot) != files:
         raise ValueError("snapshot file set changed while its identity was captured")
@@ -170,12 +209,37 @@ def verify_snapshot_identity(snapshot: Path, expected: DatasetSnapshotIdentity) 
         raise ValueError("snapshot changed while it was being processed")
 
 
+def build_snapshot_transfer_receipt(
+    *,
+    source: DatasetSource,
+    registry_sha256: str,
+    registry_bytes: int,
+    snapshot: DatasetSnapshotIdentity,
+    snapshot_scope: SnapshotScope = "complete",
+    allow_patterns: tuple[str, ...] = (),
+) -> DatasetSnapshotTransferReceipt:
+    """Build a self-validating receipt for a complete or explicitly filtered transfer."""
+
+    return DatasetSnapshotTransferReceipt(
+        source=source,
+        registry_sha256=registry_sha256,
+        registry_bytes=registry_bytes,
+        snapshot_scope=snapshot_scope,
+        allow_patterns=allow_patterns,
+        snapshot=snapshot,
+    )
+
+
 def build_dataset_lineage_manifest(
     *,
     source: DatasetSource,
     registry_sha256: str,
     registry_bytes: int,
     snapshot: DatasetSnapshotIdentity,
+    transfer_receipt: DatasetSnapshotTransferReceipt,
+    transfer_receipt_artifact: str,
+    transfer_receipt_sha256: str,
+    transfer_receipt_bytes: int,
     report: DatasetAuditReport,
     audit_artifact: str,
     audit_sha256: str,
@@ -187,6 +251,22 @@ def build_dataset_lineage_manifest(
 
     if source.status is not VerificationStatus.PASS or source.revision is None:
         raise ValueError("lineage requires an exact registry-PASS pinned source")
+    if transfer_receipt.snapshot_scope != "complete":
+        raise ValueError("lineage requires a complete snapshot transfer receipt")
+    if transfer_receipt.source != source:
+        raise ValueError("transfer receipt source does not match the registry source")
+    if (
+        transfer_receipt.registry_sha256 != registry_sha256
+        or transfer_receipt.registry_bytes != registry_bytes
+    ):
+        raise ValueError("transfer receipt registry identity does not match the audited registry")
+    if transfer_receipt.snapshot != snapshot:
+        raise ValueError("transfer receipt snapshot identity does not match the audited snapshot")
+    canonical_receipt = canonical_json_bytes(transfer_receipt.model_dump(mode="json"))
+    if transfer_receipt_sha256 != content_digest(
+        canonical_receipt
+    ) or transfer_receipt_bytes != len(canonical_receipt):
+        raise ValueError("transfer receipt artifact identity is not canonical")
     if (
         report.source_name != source.name
         or report.source_repository_id != source.repository_id
@@ -195,6 +275,10 @@ def build_dataset_lineage_manifest(
         raise ValueError("audit report source identity does not match the registry source")
     if report.input_scope != "complete-snapshot":
         raise ValueError("lineage requires a complete-snapshot audit")
+    if report.schema_version != DATASET_AUDIT_V2_SCHEMA:
+        raise ValueError("lineage requires a valid v2 aggregate snapshot audit report")
+    if report.input_identity_schema != SNAPSHOT_IDENTITY_SCHEMA:
+        raise ValueError("lineage requires an explicit aggregate snapshot identity scheme")
     if (
         report.input_sha256 != snapshot.snapshot_sha256
         or report.input_bytes != snapshot.snapshot_bytes
@@ -231,6 +315,9 @@ def build_dataset_lineage_manifest(
         registry_sha256=registry_sha256,
         registry_bytes=registry_bytes,
         snapshot=snapshot,
+        transfer_receipt_artifact=transfer_receipt_artifact,
+        transfer_receipt_sha256=transfer_receipt_sha256,
+        transfer_receipt_bytes=transfer_receipt_bytes,
         audit_artifact=audit_artifact,
         audit_sha256=audit_sha256,
         audit_row_count=report.row_count,

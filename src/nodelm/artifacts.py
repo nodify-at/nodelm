@@ -38,12 +38,20 @@ def deterministic_artifact_name(prefix: str, inputs: Any, suffix: str = ".json")
     return f"{prefix}-{stable_model_id(inputs)[:16]}{suffix}"
 
 
-def _file_digest(path: Path) -> str:
+def file_identity(path: Path) -> tuple[str, int]:
+    """Return the SHA-256 and bytes observed during one streamed file read."""
+
     digest = hashlib.sha256()
+    byte_count = 0
     with path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
-    return digest.hexdigest()
+            byte_count += len(chunk)
+    return digest.hexdigest(), byte_count
+
+
+def _file_digest(path: Path) -> str:
+    return file_identity(path)[0]
 
 
 def _files_equal(left: Path, right: Path) -> bool:

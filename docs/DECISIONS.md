@@ -92,8 +92,28 @@ plan's current lead candidate.
 
 ## D-013 — full dataset transfer waits for large storage
 
-The dataset registry, validation, download guard, streaming materializer, and runbook are
-prepared locally. Full snapshots are not downloaded in the project workspace. Transfer and bulk
-materialization require explicit current-session confirmation after the user provisions a GPU
-instance with larger storage and records a capacity budget using
-`docs/DATA_DOWNLOAD_RUNBOOK.md`.
+The dataset registry, validation, download guard, streaming materializer, offline snapshot-audit
+and lineage contract, and runbook are prepared locally. Full snapshots are not downloaded in the
+project workspace. Transfer and bulk materialization require explicit current-session
+confirmation after the user provisions a GPU instance with larger storage and records a capacity
+budget using `docs/DATA_DOWNLOAD_RUNBOOK.md`.
+
+## D-014 — snapshot lineage content-binds local audit evidence
+
+The guarded pinned download publishes an immutable transfer receipt that joins the exact source
+and raw registry identity to the complete supported snapshot inventory. Filtered receipts are
+recorded truthfully but cannot authorize `datasets audit-snapshot`. The aggregate identity covers
+normalized sorted relative paths, each file's bytes and digest, and total bytes. Offline audit
+copies the receipt-bound files into a private staged view, verifies the staged aggregate, and
+parses only those private bytes so a source-path replace/read/restore race cannot split content
+identity from logical rows. Legacy raw-file reports preserve the `nodelm.dataset-audit/v1` shape;
+complete aggregate-snapshot reports use `nodelm.dataset-audit/v2` and declare the aggregate
+identity scheme. Lineage binds the receipt, registry, snapshot, logical rows, canonical report,
+and complete rejection ledger. Each immutable publication has one dependency recheck, and
+lineage is published last as the completion marker. Private staging is a trusted-local boundary,
+not protection from a hostile same-user process.
+
+The lineage status mirrors the core snapshot audit and may retain truthful `FAIL` evidence. A
+synthetic-fixture `PASS` proves only this contract. It does not complete Phase 0, attest an
+untransferred source, measure tokenizer-based trajectory length, perform patch decontamination,
+or establish public-evaluation overlap.

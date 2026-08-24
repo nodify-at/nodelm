@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -14,22 +13,25 @@ import yaml
 from pydantic import ValidationError
 
 from nodelm.artifacts import (
-    ArtifactCollisionError,
     canonical_json_bytes,
     content_digest,
+    file_identity,
     write_immutable_json,
     write_immutable_stream,
 )
 from nodelm.datasets.audit import audit_rows, iter_license_rejections
 from nodelm.datasets.hub import download_pinned_snapshot, verify_hub_source
-from nodelm.datasets.lineage import (
-    build_dataset_lineage_manifest,
-    capture_snapshot_identity,
-    verify_snapshot_identity,
-)
 from nodelm.datasets.materialize import discover_snapshot_files, iter_snapshot_rows
 from nodelm.datasets.pilot import PilotFilter, PilotPolicyConfig, build_pilot_subset
 from nodelm.datasets.registry import DatasetRegistry
+from nodelm.datasets.snapshot_audit import (
+    SnapshotAuditError,
+    audit_snapshot,
+)
+from nodelm.datasets.snapshot_transfer import (
+    SnapshotTransferError,
+    transfer_snapshot,
+)
 from nodelm.decontamination.contamination import (
     BenchmarkEntry,
     ContaminationSample,
@@ -143,18 +145,8 @@ def _read_repository_aliases(path: Path | None) -> dict[str, str]:
     return aliases
 
 
-def _file_identity(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-            byte_count += len(chunk)
-    return digest.hexdigest(), byte_count
-
-
 def _require_unchanged_file(path: Path, expected: tuple[str, int]) -> None:
-    if _file_identity(path) != expected:
+    if file_identity(path) != expected:
         raise typer.BadParameter(f"input changed while it was being processed: {path}")
 
 
@@ -246,7 +238,7 @@ def datasets_audit(
     config: Path = typer.Option(Path("configs/datasets/registry.yaml"), exists=True),
 ) -> None:
     registry = DatasetRegistry.load(config)
-    input_identity = _file_identity(input_path)
+    input_identity = file_identity(input_path)
     input_sha256, input_bytes = input_identity
     try:
         report = audit_rows(
@@ -296,154 +288,36 @@ def datasets_audit(
 def datasets_audit_snapshot(
     source_name: str = typer.Option(..., "--source"),
     snapshot: Path = typer.Option(..., "--snapshot", exists=True),
+    receipt: Path = typer.Option(..., "--receipt", exists=True, dir_okay=False),
     output: Path = typer.Option(..., "--output", dir_okay=False),
     lineage_output: Path | None = typer.Option(None, "--lineage-output", dir_okay=False),
     rejections_output: Path | None = typer.Option(None, "--rejections-output", dir_okay=False),
+    staging_root: Path | None = typer.Option(None, "--staging-root", file_okay=False),
     config: Path = typer.Option(
         Path("configs/datasets/registry.yaml"), exists=True, dir_okay=False
     ),
 ) -> None:
     """Audit every supported file in a local pinned snapshot without network access."""
 
-    lineage_path = lineage_output or output.with_name(f"{output.stem}.lineage.json")
-    ledger_path = rejections_output or output.with_name(f"{output.stem}.rejections.jsonl")
-    artifact_paths = tuple(path.resolve() for path in (output, ledger_path, lineage_path))
-    if len(set(artifact_paths)) != len(artifact_paths):
-        raise typer.BadParameter("audit, rejection ledger, and lineage outputs must be distinct")
-
-    resolved_snapshot = snapshot.resolve()
-    if resolved_snapshot.is_dir():
-        if any(path.is_relative_to(resolved_snapshot) for path in artifact_paths):
-            raise typer.BadParameter("all audit outputs must be outside a directory snapshot")
-    elif resolved_snapshot in artifact_paths:
-        raise typer.BadParameter("audit outputs must be distinct from the snapshot input")
-    if config.resolve() in artifact_paths:
-        raise typer.BadParameter("audit outputs must be distinct from the registry input")
-
     try:
-        registry_identity = _file_identity(config)
-        registry = DatasetRegistry.load(config)
-        source = registry.by_name(source_name)
-    except (OSError, ValueError) as error:
-        raise typer.BadParameter(f"invalid dataset registry: {error}") from error
-    try:
-        _require_unchanged_file(config, registry_identity)
-    except OSError as error:
-        raise typer.BadParameter(f"dataset registry changed while loading: {error}") from error
-    if source.status is not VerificationStatus.PASS or source.revision is None:
-        raise typer.BadParameter("snapshot audit requires a registry-verified pinned source")
-
-    try:
-        snapshot_identity = capture_snapshot_identity(snapshot)
-        snapshot_files = discover_snapshot_files(snapshot)
-    except (OSError, ValueError, ValidationError) as error:
-        raise typer.BadParameter(f"unable to capture snapshot identity: {error}") from error
-
-    def verify_inputs() -> None:
-        try:
-            _require_unchanged_file(config, registry_identity)
-            verify_snapshot_identity(snapshot, snapshot_identity)
-        except (OSError, ValueError, ValidationError) as error:
-            raise typer.BadParameter(str(error)) from error
-
-    verify_inputs()
-    try:
-        report = audit_rows(
-            source,
-            iter_snapshot_rows(snapshot_files),
-            input_sha256=snapshot_identity.snapshot_sha256,
-            input_bytes=snapshot_identity.snapshot_bytes,
-            expect_complete_snapshot=True,
+        result = audit_snapshot(
+            source_name=source_name,
+            snapshot=snapshot,
+            receipt_path=receipt,
+            output=output,
+            lineage_output=lineage_output,
+            rejections_output=rejections_output,
+            staging_root=staging_root,
+            config=config,
         )
-    except (OSError, ValueError, NormalizationError) as error:
-        raise typer.BadParameter(f"snapshot audit failed: {error}") from error
-
-    ledger_row_count = 0
-    ledger_byte_count = 0
-
-    def write_rejection_ledger(stream: BinaryIO) -> None:
-        nonlocal ledger_byte_count, ledger_row_count
-        for rejection in iter_license_rejections(iter_snapshot_rows(snapshot_files)):
-            encoded = canonical_json_bytes(rejection)
-            stream.write(encoded)
-            ledger_row_count += 1
-            ledger_byte_count += len(encoded)
-
-    try:
-        ledger_result = write_immutable_stream(
-            ledger_path,
-            write_rejection_ledger,
-            before_publish=verify_inputs,
-        )
-    except (ArtifactCollisionError, OSError, ValueError) as error:
-        raise typer.BadParameter(f"snapshot audit publication failed: {error}") from error
-    ledger_identity = (ledger_result.digest, ledger_byte_count)
-
-    report_ledger_artifact = os.path.relpath(
-        ledger_result.path,
-        start=output.resolve().parent,
-    )
-    report = type(report).model_validate(
-        {
-            **report.model_dump(mode="json"),
-            "rejection_ledger_artifact": report_ledger_artifact,
-            "rejection_ledger_sha256": ledger_result.digest,
-            "rejection_ledger_rows": ledger_row_count,
-        }
-    )
-    report_bytes = canonical_json_bytes(report.model_dump(mode="json"))
-
-    def verify_report_inputs() -> None:
-        verify_inputs()
-        _require_unchanged_file(ledger_result.path, ledger_identity)
-
-    try:
-        report_result = write_immutable_stream(
-            output,
-            lambda stream: stream.write(report_bytes),
-            before_publish=verify_report_inputs,
-        )
-    except (ArtifactCollisionError, OSError, ValueError) as error:
-        raise typer.BadParameter(f"snapshot audit publication failed: {error}") from error
-    report_identity = (report_result.digest, len(report_bytes))
-
-    def verify_lineage_inputs() -> None:
-        verify_report_inputs()
-        _require_unchanged_file(report_result.path, report_identity)
-
-    verify_lineage_inputs()
-    try:
-        manifest = build_dataset_lineage_manifest(
-            source=source,
-            registry_sha256=registry_identity[0],
-            registry_bytes=registry_identity[1],
-            snapshot=snapshot_identity,
-            report=report,
-            audit_artifact=os.path.relpath(
-                report_result.path,
-                start=lineage_path.resolve().parent,
-            ),
-            audit_sha256=report_result.digest,
-            rejection_ledger_artifact=os.path.relpath(
-                ledger_result.path,
-                start=lineage_path.resolve().parent,
-            ),
-            rejection_ledger_sha256=ledger_result.digest,
-            rejection_ledger_rows=ledger_row_count,
-        )
-        lineage_result = write_immutable_stream(
-            lineage_path,
-            lambda stream: stream.write(canonical_json_bytes(manifest.model_dump(mode="json"))),
-            before_publish=verify_lineage_inputs,
-        )
-    except (ArtifactCollisionError, OSError, ValueError, ValidationError) as error:
-        raise typer.BadParameter(f"snapshot lineage publication failed: {error}") from error
+    except SnapshotAuditError as error:
+        raise typer.BadParameter(str(error)) from error
 
     typer.echo(
-        f"wrote {report_result.path} rows={report.row_count} sha256={report_result.digest}; "
-        f"lineage={lineage_result.path}"
+        f"wrote {result.audit_result.path} rows={result.report.row_count} "
+        f"sha256={result.audit_result.digest}; lineage={result.lineage_result.path}"
     )
-    if report.status is VerificationStatus.FAIL:
+    if result.report.status is VerificationStatus.FAIL:
         raise typer.Exit(code=1)
 
 
@@ -475,6 +349,7 @@ def datasets_download(
     source_name: str = typer.Option(..., "--source"),
     destination: Path = typer.Option(..., "--destination", file_okay=False),
     allow_pattern: list[str] | None = typer.Option(None, "--allow-pattern"),
+    receipt_output: Path | None = typer.Option(None, "--receipt-output", dir_okay=False),
     confirm_large_download: bool = typer.Option(False, "--confirm-large-download"),
     config: Path = typer.Option(Path("configs/datasets/registry.yaml"), exists=True),
 ) -> None:
@@ -482,13 +357,21 @@ def datasets_download(
         raise typer.BadParameter(
             "dataset snapshots may be very large; pass --confirm-large-download"
         )
-    if destination.exists() and any(destination.iterdir()):
-        raise typer.BadParameter(f"download destination must be new or empty: {destination}")
-    source = DatasetRegistry.load(config).by_name(source_name)
-    path = download_pinned_snapshot(
-        source, destination=destination, allow_patterns=tuple(allow_pattern or ())
+    try:
+        result = transfer_snapshot(
+            source_name=source_name,
+            destination=destination,
+            allow_patterns=tuple(allow_pattern or ()),
+            receipt_output=receipt_output,
+            config=config,
+            downloader=download_pinned_snapshot,
+        )
+    except SnapshotTransferError as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(
+        f"downloaded pinned snapshot to {result.snapshot_path}; "
+        f"receipt={result.receipt_result.path}"
     )
-    typer.echo(f"downloaded pinned snapshot to {path}")
 
 
 @datasets_app.command("materialize")
@@ -504,13 +387,13 @@ def datasets_materialize(
     source = DatasetRegistry.load(config).by_name(source_name)
     if source.status is not VerificationStatus.PASS or source.revision is None:
         raise typer.BadParameter("materialization requires a registry-verified pinned source")
-    config_identity = _file_identity(config)
+    config_identity = file_identity(config)
     patterns = tuple(file_pattern or ())
     try:
         files = discover_snapshot_files(snapshot, patterns=patterns)
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
-    identities = tuple((path, _file_identity(path)) for path in files)
+    identities = tuple((path, file_identity(path)) for path in files)
     row_count = 0
 
     def verify_inputs() -> None:
@@ -583,9 +466,9 @@ def datasets_normalize(
     source = DatasetRegistry.load(config).by_name(source_name)
     if source.status is not VerificationStatus.PASS or source.revision is None:
         raise typer.BadParameter("normalization requires a registry-verified pinned source")
-    input_identity = _file_identity(input_path)
-    task_identity = _file_identity(task_metadata) if task_metadata is not None else None
-    config_identity = _file_identity(config)
+    input_identity = file_identity(input_path)
+    task_identity = file_identity(task_metadata) if task_metadata is not None else None
+    config_identity = file_identity(config)
     rejection_path = rejections_output or output.with_name(f"{output.stem}.rejections.jsonl")
     accepted_count = 0
     rejected_count = 0
@@ -705,9 +588,9 @@ def datasets_build_pilot(
     max_samples: int | None = typer.Option(None, min=1),
     max_patch_bytes: int | None = typer.Option(None, min=1),
 ) -> None:
-    policy_identity = _file_identity(policy_config)
-    registry_identity = _file_identity(registry_config)
-    split_identity = _file_identity(split_manifest)
+    policy_identity = file_identity(policy_config)
+    registry_identity = file_identity(registry_config)
+    split_identity = file_identity(split_manifest)
     try:
         pilot_policy = PilotPolicyConfig.model_validate(_read_yaml_mapping(policy_config))
     except ValidationError as error:
@@ -715,7 +598,7 @@ def datasets_build_pilot(
     registry = DatasetRegistry.load(registry_config)
     verified_sources = {source.name: source for source in registry.sources}
     training_repositories, evaluation_repositories = _split_repositories(split_manifest)
-    input_identity = _file_identity(input_path)
+    input_identity = file_identity(input_path)
 
     def validated_samples() -> Iterator[NormalizedSample]:
         for row in _read_jsonl(input_path):
@@ -830,10 +713,10 @@ def split_build(
     evaluation_fraction: float = typer.Option(0.1, min=0.000001, max=0.999999),
     aliases_path: Path | None = typer.Option(None, "--aliases", exists=True, dir_okay=False),
 ) -> None:
-    task_metadata_identity = _file_identity(task_metadata_path)
-    benchmark_identity = _file_identity(benchmark_path)
-    input_identity = _file_identity(input_path)
-    aliases_identity = _file_identity(aliases_path) if aliases_path is not None else None
+    task_metadata_identity = file_identity(task_metadata_path)
+    benchmark_identity = file_identity(benchmark_path)
+    input_identity = file_identity(input_path)
+    aliases_identity = file_identity(aliases_path) if aliases_path is not None else None
 
     def required_text(record: dict[str, Any], *fields: str) -> str:
         for field in fields:
@@ -1137,8 +1020,8 @@ def training_run_lifecycle(
         or runtime is None
     ):
         raise AssertionError("runnable training configuration lost required fields")
-    samples_identity = _file_identity(samples)
-    pilot_identity = _file_identity(pilot_manifest)
+    samples_identity = file_identity(samples)
+    pilot_identity = file_identity(pilot_manifest)
     _validate_pilot_manifest(
         pilot_manifest,
         samples=samples,
@@ -1171,7 +1054,7 @@ def training_run_lifecycle(
     evaluation_files = tuple(
         sorted(path.resolve() for path in evaluation_workspace.rglob("*") if path.is_file())
     )
-    evaluation_identities = tuple((path, _file_identity(path)) for path in evaluation_files)
+    evaluation_identities = tuple((path, file_identity(path)) for path in evaluation_files)
     backend = TransformersSmokeBackend(settings)
     report = run_training_lifecycle(
         backend,

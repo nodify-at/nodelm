@@ -34,8 +34,8 @@ uv sync --extra training --group dev
 Full dataset transfer is intentionally deferred until a large-storage GPU instance is
 provisioned. [`docs/DATA_DOWNLOAD_RUNBOOK.md`](docs/DATA_DOWNLOAD_RUNBOOK.md) is the sole
 full-transfer procedure: run it only on that future host, with its absolute external-volume
-destinations and explicit current-session confirmation. No full snapshot is required for the
-current plan-activation work.
+destinations and explicit current-session confirmation. Local contract development and
+synthetic verification require no full snapshot.
 
 ```bash
 # Validate the dataset registry without downloading snapshots.
@@ -43,6 +43,18 @@ uv run nodelm datasets validate
 
 # Check the pinned revision and dataset-card license against the live Hub.
 ./scripts/verify_datasets.sh
+
+# Future large-storage host only: audit an already-transferred snapshot offline. This command
+# does not download data or contact the Hub. It requires the immutable receipt emitted by the
+# guarded download and uses temporary private staging on the large volume.
+uv run nodelm datasets audit-snapshot \
+  --source open-swe-traces \
+  --snapshot /large-volume/nodelm/snapshots/open-swe-traces \
+  --receipt /large-volume/nodelm/receipts/open-swe-traces.transfer.json \
+  --staging-root /large-volume/nodelm/staging \
+  --output /large-volume/nodelm/audits/open-swe-traces.audit.json \
+  --lineage-output /large-volume/nodelm/audits/open-swe-traces.lineage.json \
+  --rejections-output /large-volume/nodelm/audits/open-swe-traces.rejections.jsonl
 
 # Verify the local repository harness against the fixture project.
 ./scripts/verify_harness.sh
@@ -96,6 +108,7 @@ See [CODEX.md](CODEX.md) for future agent-development rules and
 
 `NodeLM_TypeScript_Node_Distillation_Plan.md` is now the tracked project ground truth. Its three
 student candidates and primary teacher are pinned in strict metadata contracts. Metadata is
-`PASS`; model execution, the 50–100-task candidate bake-off, student selection, full dataset
-snapshot audit, and training remain `NOT RUN`. See [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md)
-for the active gates.
+`PASS`, and the offline snapshot/lineage contract passes synthetic fixtures. Model execution,
+the 50–100-task candidate bake-off, student selection, real dataset transfer and per-source
+audit/lineage results, and training remain `NOT RUN`. See
+[`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.
