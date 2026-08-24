@@ -1,8 +1,8 @@
 # Codex development guide
 
 This file is the durable handoff for future Codex work on NodeLM. Read it together with
-`README.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, and the root NodeLM plan when that
-plan is available.
+`README.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, and the tracked root
+`NodeLM_TypeScript_Node_Distillation_Plan.md`.
 
 ## Non-negotiable rules
 
@@ -27,6 +27,10 @@ plan is available.
   integrity-attested oracle it remains `UNVERIFIED`.
 - Never commit credentials, raw private keys, generated datasets, model weights, checkpoints,
   or measured artifacts that contain sensitive source data.
+- Full dataset snapshots are deliberately deferred until the user provisions a GPU instance
+  with larger storage. Metadata checks, contracts, and preflight preparation are allowed, but
+  do not start a full snapshot transfer or bulk materialization without explicit confirmation
+  in the current session. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` on the future host.
 - Keep the project hardware-agnostic. Hardware-specific configuration belongs under
   `configs/infra/`, not in core dataset or harness logic.
 

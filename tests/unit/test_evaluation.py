@@ -28,14 +28,31 @@ class FakeAdapter:
         )
 
 
+def _verified_candidate(**overrides: object) -> CandidateModel:
+    payload: dict[str, object] = {
+        "name": "fixture",
+        "repository_id": "owner/model",
+        "revision": "a" * 40,
+        "license": "Apache-2.0",
+        "parameter_count": 1,
+        "active_parameter_count": 1,
+        "architecture": "FixtureForCausalLM",
+        "model_type": "fixture",
+        "loader_class": "AutoModelForCausalLM",
+        "context_limit": 1024,
+        "metadata_verified_on": "2026-08-24",
+        "evidence_urls": (
+            "https://huggingface.co/owner/model",
+            f"https://huggingface.co/owner/model/commit/{'a' * 40}",
+        ),
+        "metadata_status": VerificationStatus.PASS,
+    }
+    payload.update(overrides)
+    return CandidateModel.model_validate(payload)
+
+
 def test_candidate_evaluation_records_measured_fields_without_inventing_benchmark_result() -> None:
-    candidate = CandidateModel(
-        name="fixture",
-        repository_id="owner/model",
-        revision="a" * 40,
-        license="Apache-2.0",
-        status=VerificationStatus.PASS,
-    )
+    candidate = _verified_candidate()
     context = SolveContext(repository="acme/widget", base_commit="b" * 40, task="Inspect")
 
     result = evaluate_adapter(
@@ -69,13 +86,7 @@ def test_candidate_adapter_can_return_real_common_harness_evidence() -> None:
                 evidence={"fixture": "passed"},
             )
 
-    candidate = CandidateModel(
-        name="fixture",
-        repository_id="owner/model",
-        revision="a" * 40,
-        license="Apache-2.0",
-        status=VerificationStatus.PASS,
-    )
+    candidate = _verified_candidate()
     context = SolveContext(repository="acme/widget", base_commit="b" * 40, task="Inspect")
 
     result = evaluate_adapter(
@@ -96,23 +107,14 @@ def test_candidate_adapter_can_return_real_common_harness_evidence() -> None:
 
 def test_pass_candidate_rejects_symbolic_revision() -> None:
     with pytest.raises(ValidationError, match="40-hex"):
-        CandidateModel(
-            name="fixture",
-            repository_id="owner/model",
+        _verified_candidate(
             revision="main",
-            license="Apache-2.0",
-            status=VerificationStatus.PASS,
+            evidence_urls=("https://huggingface.co/owner/model/commit/main",),
         )
 
 
 def test_pass_evaluation_requires_harness_outcomes() -> None:
-    candidate = CandidateModel(
-        name="fixture",
-        repository_id="owner/model",
-        revision="a" * 40,
-        license="Apache-2.0",
-        status=VerificationStatus.PASS,
-    )
+    candidate = _verified_candidate()
 
     with pytest.raises(ValidationError, match="valid-tool"):
         CandidateEvaluation(

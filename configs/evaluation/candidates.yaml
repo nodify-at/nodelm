@@ -1,6 +1,64 @@
 schema_version: nodelm.candidate-registry/v1
-status: UNVERIFIED
-candidates: []
+metadata_status: PASS
+execution_status: NOT RUN
+bakeoff_status: NOT RUN
+selected_candidate: null
+execution_evidence: []
+bakeoff_evidence: []
 reason: >-
-  NodeLM_TypeScript_Node_Distillation_Plan.md is not visible. Candidate model IDs,
-  revisions, licenses, architectures, and context limits must not be invented.
+  Immutable public metadata is verified. No model weights have been downloaded or
+  loaded, no candidate has been executed, and the same-harness 50-100 task bake-off
+  has not run; therefore no student is selected.
+candidates:
+  - name: qwen3.6-27b
+    repository_id: Qwen/Qwen3.6-27B
+    revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+    license: Apache-2.0
+    parameter_count: 27000000000
+    active_parameter_count: 27000000000
+    architecture: Qwen3_5ForConditionalGeneration
+    model_type: qwen3_5
+    loader_class: AutoModelForMultimodalLM
+    context_limit: 262144
+    metadata_verified_on: "2026-08-24"
+    evidence_urls:
+      - https://huggingface.co/Qwen/Qwen3.6-27B
+      - https://huggingface.co/Qwen/Qwen3.6-27B/commit/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+      - https://huggingface.co/Qwen/Qwen3.6-27B/blob/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9/config.json
+    metadata_status: PASS
+    notes: >-
+      Dense 27B candidate and current plan lead; lead status is not a bake-off result.
+  - name: qwen3.5-35b-a3b
+    repository_id: Qwen/Qwen3.5-35B-A3B
+    revision: 59d61f3ce65a6d9863b86d2e96597125219dc754
+    license: Apache-2.0
+    parameter_count: 35000000000
+    active_parameter_count: 3000000000
+    architecture: Qwen3_5MoeForConditionalGeneration
+    model_type: qwen3_5_moe
+    loader_class: AutoModelForMultimodalLM
+    context_limit: 262144
+    metadata_verified_on: "2026-08-24"
+    evidence_urls:
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B/commit/59d61f3ce65a6d9863b86d2e96597125219dc754
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/59d61f3ce65a6d9863b86d2e96597125219dc754/config.json
+    metadata_status: PASS
+    notes: Sparse candidate with approximately 3B active parameters per token.
+  - name: qwen3-coder-next
+    repository_id: Qwen/Qwen3-Coder-Next
+    revision: a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb
+    license: Apache-2.0
+    parameter_count: 80000000000
+    active_parameter_count: 3000000000
+    architecture: Qwen3NextForCausalLM
+    model_type: qwen3_next
+    loader_class: AutoModelForCausalLM
+    context_limit: 262144
+    metadata_verified_on: "2026-08-24"
+    evidence_urls:
+      - https://huggingface.co/Qwen/Qwen3-Coder-Next
+      - https://huggingface.co/Qwen/Qwen3-Coder-Next/commit/a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb
+      - https://huggingface.co/Qwen/Qwen3-Coder-Next/blob/a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb/config.json
+    metadata_status: PASS
+    notes: Sparse code-specialized candidate with approximately 3B active parameters per token.

@@ -18,5 +18,7 @@ checkpoint:
   resume: true
 inference_after_reload: true
 reason: >-
-  The exact model architecture and compatible precision/backend depend on the missing
-  ground-truth plan and must pass a remote model smoke test before this status changes.
+  The plan defines three student candidates but does not select a winner. Keep this
+  configuration non-runnable until the same-harness bake-off selects a student and that
+  architecture passes the remote load, optimizer, checkpoint, resume, and inference smoke.
+  This configuration does not authorize a model download or training run.

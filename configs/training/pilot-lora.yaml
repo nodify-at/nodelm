@@ -19,7 +19,7 @@ checkpoint:
 inference_after_reload: true
 reason: >-
   The one-step values are conservative validation-only defaults, not selected pilot
-  hyperparameters. The exact dataset manifest, model, precision, and serious-training values
-  remain unresolved until the missing ground-truth plan, frozen pilot distribution, and
-  measured hardware capacity are available. No expensive training is authorized by this
-  configuration.
+  hyperparameters. The exact dataset manifest, selected student, precision, and serious-training
+  values remain unresolved until the same-harness bake-off, frozen pilot distribution, and
+  measured hardware capacity are available. No model download or expensive training is
+  authorized by this configuration.

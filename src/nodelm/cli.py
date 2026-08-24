@@ -41,6 +41,7 @@ from nodelm.evaluation.fixture import (
     FixturePatchReport,
     evaluate_model_patch_fixture,
 )
+from nodelm.evaluation.registry import CandidateRegistry, CandidateRegistryError
 from nodelm.evaluation.sandbox import PodmanFixtureSandbox
 from nodelm.harness import (
     CommandExecutor,
@@ -320,6 +321,8 @@ def datasets_download(
         raise typer.BadParameter(
             "dataset snapshots may be very large; pass --confirm-large-download"
         )
+    if destination.exists() and any(destination.iterdir()):
+        raise typer.BadParameter(f"download destination must be new or empty: {destination}")
     source = DatasetRegistry.load(config).by_name(source_name)
     path = download_pinned_snapshot(
         source, destination=destination, allow_patterns=tuple(allow_pattern or ())
@@ -841,15 +844,24 @@ def model_smoke(
     config: Path = typer.Option(Path("configs/evaluation/candidates.yaml"), exists=True),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
-    value = _read_yaml_mapping(config)
-    candidates = value.get("candidates")
-    count = len(candidates) if isinstance(candidates, list) else 0
+    try:
+        registry = CandidateRegistry.load(config)
+    except CandidateRegistryError as error:
+        raise typer.BadParameter(f"invalid candidate registry: {error}") from error
     payload = {
-        "status": VerificationStatus.UNVERIFIED.value,
-        "candidate_count": count,
-        "reason": "candidate list requires the missing ground-truth NodeLM plan",
+        "schema_version": "nodelm.model-smoke-command/v1",
+        "status": registry.execution_status.value,
+        "metadata_status": registry.metadata_status.value,
+        "bakeoff_status": registry.bakeoff_status.value,
+        "candidate_count": len(registry.candidates),
+        "selected_candidate": registry.selected_candidate,
+        "reason": registry.reason,
     }
-    typer.echo(_dump(payload) if json_output else f"UNVERIFIED: {count} candidates")
+    typer.echo(
+        _dump(payload)
+        if json_output
+        else f"{registry.execution_status.value}: {len(registry.candidates)} candidates"
+    )
 
 
 @training_app.command("smoke")
@@ -868,7 +880,7 @@ def training_smoke(
         reason = "configuration parsed; model load and training were deliberately not run"
     elif not pinned:
         status = VerificationStatus.BLOCKED
-        reason = "exact model ID and revision are not selected in the missing NodeLM plan"
+        reason = "student model remains unselected until the same-harness candidate bake-off passes"
     else:
         status = VerificationStatus.BLOCKED
         reason = "use the remote verification procedure after installing the training extra"

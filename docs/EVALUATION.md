@@ -22,8 +22,10 @@ regression-test integrity.
 
 Private evaluation is frozen at repository level before serious fine-tuning. Declared mirrors,
 exact task/patch duplicates, and measured near duplicates join the same group. Public benchmark
-overlap detection is required once the ground-truth plan names the benchmark corpus.
+overlap detection is required against the plan-named public suites before training data is
+accepted. The exact benchmark inputs, private task set, and calibrated near-duplicate threshold
+are not frozen yet.
 
-The current candidate registry is `UNVERIFIED` because
-`NodeLM_TypeScript_Node_Distillation_Plan.md` is not visible. The bake-off report therefore
-contains no benchmark claims.
+The candidate registry reports metadata `PASS` for the three plan-selected candidates at exact
+revisions. Candidate execution and the common-harness 50–100-task bake-off are `NOT RUN`, no
+student is selected, and the bake-off report contains no benchmark claims.

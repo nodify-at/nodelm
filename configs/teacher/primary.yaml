@@ -1,0 +1,29 @@
+schema_version: nodelm.primary-teacher/v1
+model:
+  repository_id: deepseek-ai/DeepSeek-V4-Flash-0731
+  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+  license: MIT
+  parameter_count: 304000000000
+  active_parameter_count: null
+  architecture: DeepseekV4ForCausalLM
+  model_type: deepseek_v4
+  loader_class: AutoModelForCausalLM
+  context_limit: null
+  metadata_verified_on: "2026-08-24"
+  evidence_urls:
+    - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+    - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/commit/7872f01b1d1fe23eabc4c98b48bffcef5a386062
+    - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/7872f01b1d1fe23eabc4c98b48bffcef5a386062/config.json
+  metadata_status: PASS
+  notes: >-
+    Teacher candidate metadata only; NodeLM has not downloaded, loaded, or executed
+    this model.
+decoding:
+  reasoning_effort: max
+  temperature: 1.0
+  top_p: 0.95
+execution_status: NOT RUN
+execution_evidence: []
+reason: >-
+  The primary teacher and planned decoding are pinned from official metadata. Teacher
+  execution and generation remain NOT RUN until the harness and compute gates pass.

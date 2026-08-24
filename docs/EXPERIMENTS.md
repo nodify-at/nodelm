@@ -13,7 +13,21 @@ This ledger records executed work only. Planned checks belong in configuration, 
 - Python package build: `PASS` — both the source distribution and universal Python wheel built.
 - Real model load/training: `NOT RUN` — no verified student model was selected.
 - Remote GPU verification: `NOT RUN` — no host was requested.
-- Student bake-off: `NOT RUN` — candidate registry is `UNVERIFIED`.
+- Student bake-off: `NOT RUN` — the initial registry was unpopulated.
+
+## 2026-08-24 — plan activation (preparation only)
+
+- The NodeLM distillation plan was added as the tracked ground truth.
+- Candidate and primary-teacher public metadata: `PASS` at immutable Hugging Face revisions;
+  strict configuration validation distinguishes metadata from execution.
+- Candidate execution, bake-off, student selection, teacher execution, model load, and training:
+  `NOT RUN`.
+- Full dataset snapshot transfer and bulk materialization: `NOT RUN`; deferred to a
+  user-provisioned large-storage GPU instance.
+- Only small model metadata records were queried. No dataset snapshot, model weight, checkpoint,
+  or generated training artifact was downloaded.
+- Full offline gate: `PASS` — local doctor, Ruff, strict mypy across 48 source files, and 217
+  tests with 83.28% branch-aware coverage.
 
 New experiment entries must include immutable input revisions, config/lock digests, commands,
 versions, seed, artifact hashes, wall-clock time, and `PASS`, `FAIL`, `NOT RUN`, `BLOCKED`, or

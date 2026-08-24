@@ -19,9 +19,11 @@ an explicit `UNAVAILABLE` or `NOT_APPLICABLE` availability value. A successful a
 query may truthfully report that an optional fabric is unavailable; that is evidence, not a
 fabric-performance claim. No NCCL or RDMA benchmark is implied by discovery alone.
 
-No infrastructure request is issued yet. The student model is not selected, real memory has
-not been estimated, and the ground-truth plan is unavailable. Any GPU recommendation is
-therefore `BLOCKED`, not inferred from marketing capacity.
+No infrastructure request is issued yet. The plan identifies three candidates, but the student
+is not selected and real load/training memory has not been measured. Any training GPU
+recommendation is therefore `BLOCKED`, not inferred from marketing capacity. Full dataset
+transfer is also deferred until the user provisions a GPU instance with larger storage; the
+preflight and stop conditions are recorded in `docs/DATA_DOWNLOAD_RUNBOOK.md`.
 
 SSH inputs, when needed, are limited to host/IP, username, non-standard port, and a local key
 path or configured alias. Never request private-key contents, weaken host-key checking, modify

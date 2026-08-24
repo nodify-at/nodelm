@@ -31,29 +31,15 @@ uv sync --extra training --group dev
 
 ## Common workflows
 
+Full dataset transfer is intentionally deferred until a large-storage GPU instance is
+provisioned. [`docs/DATA_DOWNLOAD_RUNBOOK.md`](docs/DATA_DOWNLOAD_RUNBOOK.md) is the sole
+full-transfer procedure: run it only on that future host, with its absolute external-volume
+destinations and explicit current-session confirmation. No full snapshot is required for the
+current plan-activation work.
+
 ```bash
 # Validate the dataset registry without downloading snapshots.
 uv run nodelm datasets validate
-
-# Download an explicitly confirmed pinned snapshot, then stream selected Parquet/JSONL
-# files into a hashed raw JSONL slice. Use --allow-pattern/--file-pattern to constrain files.
-./scripts/download_datasets.sh \
-  --source open-swe-traces \
-  --destination data/open-swe-traces \
-  --confirm-large-download
-./scripts/materialize_snapshot.sh \
-  --source open-swe-traces \
-  --snapshot data/open-swe-traces \
-  --output data/open-swe-slice.jsonl \
-  --max-rows 20000
-
-# Audit the materialized slice. This writes an immutable summary plus a complete sibling
-# `.rejections.jsonl` license ledger.
-./scripts/audit_datasets.sh \
-  --source open-swe-traces \
-  --input data/open-swe-slice.jsonl \
-  --allow-partial-snapshot \
-  --output artifacts/reports/open-swe-audit.json
 
 # Check the pinned revision and dataset-card license against the live Hub.
 ./scripts/verify_datasets.sh
@@ -61,61 +47,11 @@ uv run nodelm datasets validate
 # Verify the local repository harness against the fixture project.
 ./scripts/verify_harness.sh
 
-# Materialize the complete pinned SWE-rebench task table used for the provenance-safe join.
-# The normalizer indexes only instance ID, repository, base commit, license, and language;
-# task text and gold patches never cross into normalized training samples.
-./scripts/download_datasets.sh \
-  --source swe-rebench-v2 \
-  --destination data/swe-rebench-v2 \
-  --allow-pattern 'data/*.parquet' \
-  --confirm-large-download
-./scripts/materialize_snapshot.sh \
-  --source swe-rebench-v2 \
-  --snapshot data/swe-rebench-v2 \
-  --file-pattern 'data/*.parquet' \
-  --output data/swe-rebench-v2-tasks.jsonl
-
-# Normalize traces. Open-SWE rows lacking base-commit metadata can join only the safe
-# repository/base-commit/license/language fields from the materialized SWE-rebench task table;
-# gold patches and problem statements never cross the join. Set harness/model labels to the
-# exact selected source configuration rather than guessing them.
-./scripts/normalize_datasets.sh \
-  --source open-swe-traces \
-  --input data/open-swe-slice.jsonl \
-  --task-metadata data/swe-rebench-v2-tasks.jsonl \
-  --harness '<verified source scaffold>' \
-  --generating-model '<verified source model/config>' \
-  --output data/normalized-samples.jsonl
-
-# Freeze a disk-backed contamination split directly from normalized samples. The source plan
-# must select a public benchmark JSONL and the audit must measure a near-duplicate threshold;
-# there are deliberately no defaults for either input. Benchmark rows require
-# benchmark_id/instance_id/id, problem_statement/task/task_description, and patch/reference_patch.
-# Add --aliases <versioned-yaml> when known mirrors/forks must be grouped.
-: "${NODELM_PUBLIC_BENCHMARK_JSONL:?set the plan-selected public benchmark JSONL}"
-: "${NODELM_NEAR_DUPLICATE_THRESHOLD:?set the measured greater-than-0-to-1 threshold}"
-./scripts/build_eval_split.sh \
-  --input data/normalized-samples.jsonl \
-  --task-metadata data/swe-rebench-v2-tasks.jsonl \
-  --benchmark "${NODELM_PUBLIC_BENCHMARK_JSONL}" \
-  --near-duplicate-threshold "${NODELM_NEAR_DUPLICATE_THRESHOLD}" \
-  --output artifacts/manifests/repository-split.json
-
-# The manifest records input digests, typed comparison/match counts, connected contamination
-# groups, and repositories excluded for exact or near public-benchmark overlap. It never embeds
-# task statements or reference/generated patch text.
-
-# Build a pilot only from registry-verified sources and the frozen split. The command writes
-# a compact manifest and a companion `pilot-sft.samples.jsonl` training artifact.
-./scripts/build_tsjs_subset.sh \
-  --input data/normalized-samples.jsonl \
-  --split-manifest artifacts/manifests/repository-split.json \
-  --output artifacts/manifests/pilot-sft.json
-
 # Validate training configuration without loading a model.
 ./scripts/training_smoke_test.sh --dry-run
 
-# Once the plan supplies a pinned, schema-valid runtime config, execute one real lifecycle:
+# Once the bake-off selects a student and a schema-valid runtime config is verified, execute one
+# real lifecycle:
 # tokenize a pilot batch, run an optimizer step, save/reload model and optimizer state, run a
 # resumed optimizer step, then inference and a model-authored patch. NODELM_SANDBOX_IMAGE names an
 # already-loaded rootless Podman image as name@sha256:<64 lowercase hexadecimal characters>.
@@ -158,7 +94,8 @@ See [CODEX.md](CODEX.md) for future agent-development rules and
 
 ## Specification status
 
-`NodeLM_Ultra_Agent_Bootstrap_Command.md` was supplied as the execution brief. It names
-`NodeLM_TypeScript_Node_Distillation_Plan.md` as the project ground truth, but that file was
-not visible when this repository was initialized. Choices that require its candidate-model
-list remain explicitly `UNVERIFIED`; the code does not invent replacements.
+`NodeLM_TypeScript_Node_Distillation_Plan.md` is now the tracked project ground truth. Its three
+student candidates and primary teacher are pinned in strict metadata contracts. Metadata is
+`PASS`; model execution, the 50–100-task candidate bake-off, student selection, full dataset
+snapshot audit, and training remain `NOT RUN`. See [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md)
+for the active gates.

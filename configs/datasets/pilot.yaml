@@ -16,4 +16,4 @@ max_patch_bytes: null
 max_trajectory_steps: null
 notes: >-
   The target is a cap, never a padding requirement. Patch and trajectory length thresholds await
-  empirical distributions from the pinned snapshots and the ground-truth NodeLM plan.
+  empirical distributions from the full pinned-snapshot audit and a frozen contamination policy.

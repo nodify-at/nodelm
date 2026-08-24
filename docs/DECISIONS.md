@@ -22,9 +22,9 @@ Repository identity is the minimum split group. Declared mirrors plus exact or m
 task/reference-patch/generated-patch matches join one connected group. Exact or near overlap
 with an explicitly selected public benchmark excludes the entire group from training and
 private evaluation. The benchmark JSONL and strictly positive threshold are required inputs, so
-the absent source plan remains an honest blocker rather than being replaced by implicit
-defaults. Offline mirror detection remains incomplete and still requires an additional audit
-before tuning.
+the currently unfrozen benchmark input and threshold remain honest blockers rather than being
+replaced by implicit defaults. Offline mirror detection remains incomplete and still requires
+an additional audit before tuning.
 
 ## D-005 — trusted local and untrusted execution stay separate
 
@@ -34,10 +34,11 @@ workspace bind is read-only, networking and implicit pulls are disabled, resourc
 and a named container is force-removed in a `finally` path. Only bounded text patches reach the
 apply step, and protected repository-test paths reject symlink components.
 
-## D-006 — no default model without the source plan
+## D-006 — no default model without the source plan (superseded by D-012)
 
-The missing NodeLM plan prevents a safe candidate or teacher selection. Configurations keep
-those fields null and report `UNVERIFIED`/`BLOCKED` rather than inventing replacements.
+At bootstrap, the NodeLM plan was unavailable. Configurations therefore kept model fields null
+and reported `UNVERIFIED`/`BLOCKED` rather than inventing replacements. D-012 records the
+activation policy now that the plan is tracked.
 
 ## D-007 — disk-backed split and bounded audit summaries
 
@@ -80,3 +81,19 @@ before/after source hashes. It can pass only after the expected failing baseline
 transition, protected-tree integrity, and final tests are observed. A generic repository test
 command has no equivalent integrity-attested oracle, so a zero exit remains `UNVERIFIED` rather
 than proving task resolution or regression safety.
+
+## D-012 — plan activation separates metadata from execution
+
+The tracked plan settles the teacher and three candidate identities, but explicitly requires an
+empirical student selection. Immutable public metadata may report `PASS`; model load, execution,
+bake-off, student selection, and training retain separate statuses and remain `NOT RUN` until
+their evidence exists. Training configurations stay non-runnable rather than preselecting the
+plan's current lead candidate.
+
+## D-013 — full dataset transfer waits for large storage
+
+The dataset registry, validation, download guard, streaming materializer, and runbook are
+prepared locally. Full snapshots are not downloaded in the project workspace. Transfer and bulk
+materialization require explicit current-session confirmation after the user provisions a GPU
+instance with larger storage and records a capacity budget using
+`docs/DATA_DOWNLOAD_RUNBOOK.md`.

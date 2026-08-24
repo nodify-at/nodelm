@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -11,30 +10,9 @@ from nodelm.evaluation.fixture import (
     FixturePatchReport,
     evaluate_model_patch_fixture,
 )
+from nodelm.evaluation.registry import CandidateModel
 from nodelm.evaluation.sandbox import FixtureSandbox
 from nodelm.models import SolveContext, VerificationStatus
-
-
-class CandidateModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    name: str
-    repository_id: str
-    revision: str | None = None
-    license: str | None = None
-    parameter_count: int | None = Field(default=None, gt=0)
-    architecture: str | None = None
-    context_limit: int | None = Field(default=None, gt=0)
-    status: VerificationStatus
-
-    @model_validator(mode="after")
-    def verified_candidates_are_pinned(self) -> CandidateModel:
-        if self.status is VerificationStatus.PASS:
-            if not self.revision or re.fullmatch(r"[0-9a-fA-F]{40}", self.revision) is None:
-                raise ValueError("PASS candidate requires a full 40-hex immutable revision")
-            if not self.license:
-                raise ValueError("PASS candidate requires a license")
-        return self
 
 
 class ModelResponse(BaseModel):
@@ -184,7 +162,7 @@ def evaluate_adapter(
     backend: str,
     harness: EvaluationHarness | None = None,
 ) -> CandidateEvaluation:
-    if candidate.status is not VerificationStatus.PASS:
+    if candidate.metadata_status is not VerificationStatus.PASS:
         raise ValueError("candidate must be verified and pinned before evaluation")
     response = adapter.generate(context)
     harness_result = (

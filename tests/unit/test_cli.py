@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from nodelm.cli import app
@@ -377,14 +378,94 @@ def test_large_download_requires_explicit_confirmation(tmp_path: Path) -> None:
     assert "confirm-large-download" in result.output
 
 
+def test_large_download_rejects_nonempty_destination_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "data"
+    destination.mkdir()
+    marker = destination / "partial-snapshot"
+    marker.write_text("preserve me\n", encoding="utf-8")
+    download_called = False
+
+    def fake_download(*args: object, **kwargs: object) -> Path:
+        nonlocal download_called
+        download_called = True
+        return destination
+
+    monkeypatch.setattr("nodelm.cli.download_pinned_snapshot", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "download",
+            "--source",
+            "open-swe-traces",
+            "--destination",
+            str(destination),
+            "--confirm-large-download",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "destination must be new or empty" in result.output
+    assert download_called is False
+    assert marker.read_text(encoding="utf-8") == "preserve me\n"
+
+
+@pytest.mark.parametrize("destination_exists", (False, True))
+def test_large_download_allows_new_or_empty_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_exists: bool,
+) -> None:
+    destination = tmp_path / "data"
+    if destination_exists:
+        destination.mkdir()
+    download_called = False
+
+    def fake_download(*args: object, **kwargs: object) -> Path:
+        nonlocal download_called
+        download_called = True
+        return destination
+
+    monkeypatch.setattr("nodelm.cli.download_pinned_snapshot", fake_download)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "download",
+            "--source",
+            "open-swe-traces",
+            "--destination",
+            str(destination),
+            "--confirm-large-download",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert download_called is True
+
+
 def test_unresolved_model_and_training_commands_report_honest_statuses() -> None:
     model = CliRunner().invoke(app, ["models", "smoke", "--json"])
     training = CliRunner().invoke(app, ["training", "smoke", "--dry-run", "--json"])
+    blocked_training = CliRunner().invoke(app, ["training", "smoke", "--json"])
 
     assert model.exit_code == 0
-    assert '"status":"UNVERIFIED"' in model.output
+    model_payload = json.loads(model.output)
+    assert model_payload["metadata_status"] == "PASS"
+    assert model_payload["status"] == "NOT RUN"
+    assert model_payload["bakeoff_status"] == "NOT RUN"
+    assert model_payload["candidate_count"] == 3
+    assert model_payload["selected_candidate"] is None
     assert training.exit_code == 0
     assert '"status":"NOT RUN"' in training.output
+    assert blocked_training.exit_code == 2
+    assert '"status":"BLOCKED"' in blocked_training.output
+    assert "same-harness candidate bake-off" in blocked_training.output
 
 
 def test_training_dry_run_rejects_an_arbitrary_mapping(tmp_path: Path) -> None:
