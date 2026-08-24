@@ -14,6 +14,7 @@ import yaml
 from pydantic import ValidationError
 
 from nodelm.artifacts import (
+    ArtifactCollisionError,
     canonical_json_bytes,
     content_digest,
     write_immutable_json,
@@ -21,6 +22,11 @@ from nodelm.artifacts import (
 )
 from nodelm.datasets.audit import audit_rows, iter_license_rejections
 from nodelm.datasets.hub import download_pinned_snapshot, verify_hub_source
+from nodelm.datasets.lineage import (
+    build_dataset_lineage_manifest,
+    capture_snapshot_identity,
+    verify_snapshot_identity,
+)
 from nodelm.datasets.materialize import discover_snapshot_files, iter_snapshot_rows
 from nodelm.datasets.pilot import PilotFilter, PilotPolicyConfig, build_pilot_subset
 from nodelm.datasets.registry import DatasetRegistry
@@ -282,6 +288,161 @@ def datasets_audit(
     )
     result = write_immutable_json(output, report.model_dump(mode="json"))
     typer.echo(f"wrote {result.path} sha256={result.digest}")
+    if report.status is VerificationStatus.FAIL:
+        raise typer.Exit(code=1)
+
+
+@datasets_app.command("audit-snapshot")
+def datasets_audit_snapshot(
+    source_name: str = typer.Option(..., "--source"),
+    snapshot: Path = typer.Option(..., "--snapshot", exists=True),
+    output: Path = typer.Option(..., "--output", dir_okay=False),
+    lineage_output: Path | None = typer.Option(None, "--lineage-output", dir_okay=False),
+    rejections_output: Path | None = typer.Option(None, "--rejections-output", dir_okay=False),
+    config: Path = typer.Option(
+        Path("configs/datasets/registry.yaml"), exists=True, dir_okay=False
+    ),
+) -> None:
+    """Audit every supported file in a local pinned snapshot without network access."""
+
+    lineage_path = lineage_output or output.with_name(f"{output.stem}.lineage.json")
+    ledger_path = rejections_output or output.with_name(f"{output.stem}.rejections.jsonl")
+    artifact_paths = tuple(path.resolve() for path in (output, ledger_path, lineage_path))
+    if len(set(artifact_paths)) != len(artifact_paths):
+        raise typer.BadParameter("audit, rejection ledger, and lineage outputs must be distinct")
+
+    resolved_snapshot = snapshot.resolve()
+    if resolved_snapshot.is_dir():
+        if any(path.is_relative_to(resolved_snapshot) for path in artifact_paths):
+            raise typer.BadParameter("all audit outputs must be outside a directory snapshot")
+    elif resolved_snapshot in artifact_paths:
+        raise typer.BadParameter("audit outputs must be distinct from the snapshot input")
+    if config.resolve() in artifact_paths:
+        raise typer.BadParameter("audit outputs must be distinct from the registry input")
+
+    try:
+        registry_identity = _file_identity(config)
+        registry = DatasetRegistry.load(config)
+        source = registry.by_name(source_name)
+    except (OSError, ValueError) as error:
+        raise typer.BadParameter(f"invalid dataset registry: {error}") from error
+    try:
+        _require_unchanged_file(config, registry_identity)
+    except OSError as error:
+        raise typer.BadParameter(f"dataset registry changed while loading: {error}") from error
+    if source.status is not VerificationStatus.PASS or source.revision is None:
+        raise typer.BadParameter("snapshot audit requires a registry-verified pinned source")
+
+    try:
+        snapshot_identity = capture_snapshot_identity(snapshot)
+        snapshot_files = discover_snapshot_files(snapshot)
+    except (OSError, ValueError, ValidationError) as error:
+        raise typer.BadParameter(f"unable to capture snapshot identity: {error}") from error
+
+    def verify_inputs() -> None:
+        try:
+            _require_unchanged_file(config, registry_identity)
+            verify_snapshot_identity(snapshot, snapshot_identity)
+        except (OSError, ValueError, ValidationError) as error:
+            raise typer.BadParameter(str(error)) from error
+
+    verify_inputs()
+    try:
+        report = audit_rows(
+            source,
+            iter_snapshot_rows(snapshot_files),
+            input_sha256=snapshot_identity.snapshot_sha256,
+            input_bytes=snapshot_identity.snapshot_bytes,
+            expect_complete_snapshot=True,
+        )
+    except (OSError, ValueError, NormalizationError) as error:
+        raise typer.BadParameter(f"snapshot audit failed: {error}") from error
+
+    ledger_row_count = 0
+    ledger_byte_count = 0
+
+    def write_rejection_ledger(stream: BinaryIO) -> None:
+        nonlocal ledger_byte_count, ledger_row_count
+        for rejection in iter_license_rejections(iter_snapshot_rows(snapshot_files)):
+            encoded = canonical_json_bytes(rejection)
+            stream.write(encoded)
+            ledger_row_count += 1
+            ledger_byte_count += len(encoded)
+
+    try:
+        ledger_result = write_immutable_stream(
+            ledger_path,
+            write_rejection_ledger,
+            before_publish=verify_inputs,
+        )
+    except (ArtifactCollisionError, OSError, ValueError) as error:
+        raise typer.BadParameter(f"snapshot audit publication failed: {error}") from error
+    ledger_identity = (ledger_result.digest, ledger_byte_count)
+
+    report_ledger_artifact = os.path.relpath(
+        ledger_result.path,
+        start=output.resolve().parent,
+    )
+    report = type(report).model_validate(
+        {
+            **report.model_dump(mode="json"),
+            "rejection_ledger_artifact": report_ledger_artifact,
+            "rejection_ledger_sha256": ledger_result.digest,
+            "rejection_ledger_rows": ledger_row_count,
+        }
+    )
+    report_bytes = canonical_json_bytes(report.model_dump(mode="json"))
+
+    def verify_report_inputs() -> None:
+        verify_inputs()
+        _require_unchanged_file(ledger_result.path, ledger_identity)
+
+    try:
+        report_result = write_immutable_stream(
+            output,
+            lambda stream: stream.write(report_bytes),
+            before_publish=verify_report_inputs,
+        )
+    except (ArtifactCollisionError, OSError, ValueError) as error:
+        raise typer.BadParameter(f"snapshot audit publication failed: {error}") from error
+    report_identity = (report_result.digest, len(report_bytes))
+
+    def verify_lineage_inputs() -> None:
+        verify_report_inputs()
+        _require_unchanged_file(report_result.path, report_identity)
+
+    verify_lineage_inputs()
+    try:
+        manifest = build_dataset_lineage_manifest(
+            source=source,
+            registry_sha256=registry_identity[0],
+            registry_bytes=registry_identity[1],
+            snapshot=snapshot_identity,
+            report=report,
+            audit_artifact=os.path.relpath(
+                report_result.path,
+                start=lineage_path.resolve().parent,
+            ),
+            audit_sha256=report_result.digest,
+            rejection_ledger_artifact=os.path.relpath(
+                ledger_result.path,
+                start=lineage_path.resolve().parent,
+            ),
+            rejection_ledger_sha256=ledger_result.digest,
+            rejection_ledger_rows=ledger_row_count,
+        )
+        lineage_result = write_immutable_stream(
+            lineage_path,
+            lambda stream: stream.write(canonical_json_bytes(manifest.model_dump(mode="json"))),
+            before_publish=verify_lineage_inputs,
+        )
+    except (ArtifactCollisionError, OSError, ValueError, ValidationError) as error:
+        raise typer.BadParameter(f"snapshot lineage publication failed: {error}") from error
+
+    typer.echo(
+        f"wrote {report_result.path} rows={report.row_count} sha256={report_result.digest}; "
+        f"lineage={lineage_result.path}"
+    )
     if report.status is VerificationStatus.FAIL:
         raise typer.Exit(code=1)
 
