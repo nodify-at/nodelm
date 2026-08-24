@@ -1,0 +1,6 @@
+schema_version: nodelm.candidate-registry/v1
+status: UNVERIFIED
+candidates: []
+reason: >-
+  NodeLM_TypeScript_Node_Distillation_Plan.md is not visible. Candidate model IDs,
+  revisions, licenses, architectures, and context limits must not be invented.

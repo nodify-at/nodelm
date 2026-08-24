@@ -1,0 +1,58 @@
+schema_version: nodelm.dataset-registry/v1
+sources:
+  - name: open-swe-traces
+    repository_id: nvidia/Open-SWE-Traces
+    revision: ed95cef24df8d8bd79b4ceb0192cb420fde06521
+    dataset_license: cc-by-4.0
+    license_evidence_url: https://huggingface.co/datasets/nvidia/Open-SWE-Traces
+    snapshot_timestamp_utc: "2026-08-24T00:00:00Z"
+    observed_rows: 567824
+    evidence_urls:
+      - https://huggingface.co/api/datasets/nvidia/Open-SWE-Traces
+      - https://datasets-server.huggingface.co/size?dataset=nvidia%2FOpen-SWE-Traces
+    splits:
+      - minisweagent/qwen36_27b
+      - openhands/minimax_m25
+      - openhands/qwen35_122b
+      - openhands/qwen36_27b
+      - openhands/deepseek_v4_flash
+      - sweagent/minimax_m25
+      - sweagent/qwen35_122b
+      - sweagent/qwen36_27b
+    status: PASS
+    notes: >-
+      Live viewer totals supersede the stale 207,489-row README table. Some recent rows
+      identify AweAI-Team/Scale-SWE in hf_dataset_name; exact source composition remains
+      UNVERIFIED. Row-level repository licenses remain authoritative for the V1 gate.
+  - name: swe-rebench-v2
+    repository_id: nebius/SWE-rebench-V2
+    revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    dataset_license: cc-by-4.0
+    license_evidence_url: https://huggingface.co/datasets/nebius/SWE-rebench-V2
+    snapshot_timestamp_utc: "2026-08-24T00:00:00Z"
+    observed_rows: 32079
+    evidence_urls:
+      - https://huggingface.co/api/datasets/nebius/SWE-rebench-V2
+      - https://datasets-server.huggingface.co/size?dataset=nebius%2FSWE-rebench-V2
+    splits:
+      - default/train
+    status: PASS
+    notes: >-
+      Viewer schema types created_at as string although card prose calls it an int64.
+      Preserve nested install_config and meta fields without assuming a closed schema.
+  - name: swe-rebench-v2-prs
+    repository_id: nebius/SWE-rebench-V2-PRs
+    revision: fbf0ecf50f268d5344149e2f0097db6bede83737
+    dataset_license: cc-by-4.0
+    license_evidence_url: https://huggingface.co/datasets/nebius/SWE-rebench-V2-PRs
+    snapshot_timestamp_utc: "2026-08-24T00:00:00Z"
+    observed_rows: 126300
+    evidence_urls:
+      - https://huggingface.co/api/datasets/nebius/SWE-rebench-V2-PRs
+      - https://datasets-server.huggingface.co/size?dataset=nebius%2FSWE-rebench-V2-PRs
+    splits:
+      - default/train
+    status: PASS
+    notes: >-
+      No top-level language field is present. Nested llm_metadata is irregular and must be
+      treated as open content; created_at is string in the live schema.

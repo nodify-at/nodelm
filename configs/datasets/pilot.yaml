@@ -1,0 +1,19 @@
+schema_version: nodelm.pilot-filter/v1
+status: UNVERIFIED
+target_samples: 10000
+languages:
+  - TypeScript
+  - JavaScript
+require_resolved: true
+require_nonempty_trajectory: true
+repository_disjoint_from_evaluation: true
+allowed_repository_licenses:
+  - MIT
+  - Apache-2.0
+  - BSD-2-Clause
+  - BSD-3-Clause
+max_patch_bytes: null
+max_trajectory_steps: null
+notes: >-
+  The target is a cap, never a padding requirement. Patch and trajectory length thresholds await
+  empirical distributions from the pinned snapshots and the ground-truth NodeLM plan.

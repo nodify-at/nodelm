@@ -1,0 +1,12 @@
+schema_version: nodelm.private-eval/v1
+status: NOT RUN
+seed: 42
+evaluation_fraction: 0.1
+repository_level_split: true
+fork_detection: declared-aliases-only
+exact_task_deduplication: true
+near_duplicate_threshold: null
+frozen_manifest: null
+notes: >-
+  Freeze the manifest before serious fine-tuning. A threshold will be selected only after
+  measuring false positives and false negatives on the pinned source snapshots.

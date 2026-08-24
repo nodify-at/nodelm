@@ -1,0 +1,20 @@
+schema_version: nodelm.infrastructure-profiles/v1
+status: UNVERIFIED
+profiles:
+  - name: dgx-spark-1x
+    target: 1x DGX Spark / GB10
+  - name: dgx-spark-2x
+    target: 2x DGX Spark / GB10
+  - name: rtx-pro-5000-72gb
+    target: RTX PRO 5000 72 GB
+  - name: rtx-pro-6000-96gb
+    target: RTX PRO 6000 96 GB
+  - name: h100
+    target: H100
+  - name: h200
+    target: H200
+  - name: b200
+    target: B200
+notes: >-
+  These are supported planning targets, not verified recommendations. CUDA, memory,
+  interconnect, and framework requirements must be measured for the selected model.

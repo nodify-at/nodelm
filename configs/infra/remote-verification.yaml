@@ -1,0 +1,37 @@
+schema_version: nodelm.remote-verification/v1
+status: NOT RUN
+required_checks:
+  infrastructure:
+    - os
+    - cpu
+    - host_ram
+    - disk
+    - gpu
+    - gpu_memory
+    - driver
+    - cuda
+    - nvlink_or_nvswitch_if_applicable
+    - nccl_if_multi_gpu
+    - rdma_or_ib_if_relevant
+  model:
+    - pinned_download
+    - tokenizer_load
+    - model_load
+    - deterministic_inference
+  dataset:
+    - pinned_subset_download
+    - normalize_and_preserve_provenance
+    - tokenize_one_batch
+  training:
+    - forward
+    - backward
+    - optimizer_step
+    - checkpoint_save
+    - checkpoint_reload
+    - resumed_optimizer_step
+    - inference_after_reload
+  evaluation:
+    - fixture_task
+    - tool_call_or_patch
+    - test_execution
+    - recorded_result

@@ -1,0 +1,23 @@
+schema_version: nodelm.harness-config/v1
+backend: trusted-local
+status: UNVERIFIED
+timeout_seconds: 300
+max_output_bytes: 262144
+network_enabled: true
+network_isolation_enforced: false
+dependency_install:
+  enabled: false
+  ignore_scripts: true
+allowed_tools:
+  - git
+  - rg
+  - node
+  - npm
+  - pnpm
+  - jest
+  - vitest
+  - tsc
+  - eslint
+security_note: >-
+  trusted-local is only for checked-in fixtures. Untrusted repositories require a rootless
+  container or VM; these process controls are not a security sandbox.

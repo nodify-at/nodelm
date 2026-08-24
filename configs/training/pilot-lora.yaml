@@ -1,0 +1,25 @@
+schema_version: nodelm.training-config/v1
+status: UNVERIFIED
+purpose: pilot LoRA
+model:
+  repository_id: null
+  revision: null
+  license: null
+runtime: null
+precision: null
+seed: 42
+max_steps: 1
+batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 0.00002
+checkpoint:
+  save: true
+  reload: true
+  resume: true
+inference_after_reload: true
+reason: >-
+  The one-step values are conservative validation-only defaults, not selected pilot
+  hyperparameters. The exact dataset manifest, model, precision, and serious-training values
+  remain unresolved until the missing ground-truth plan, frozen pilot distribution, and
+  measured hardware capacity are available. No expensive training is authorized by this
+  configuration.
