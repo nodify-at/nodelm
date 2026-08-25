@@ -1,12 +1,14 @@
 # Full dataset download runbook
 
-Real transfer and real-source audit status: `NOT RUN`
+Real transfer and receipt-bound core audit status: `PASS` (completed 2026-08-24)
 
-Full snapshot transfer is deliberately deferred. Do not run the commands in the execution
-section from the local project workspace. Use this runbook only after the user provisions a GPU
-instance with larger storage and explicitly confirms the transfer in that session.
+Normalization, decontamination, and split freezing remain `NOT RUN`. The completed snapshots and
+raw evidence live outside Git under `/workspace/nodelm` on persistent storage; their compact
+digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is currently required.
+Use this runbook only for recovery or an explicitly authorized re-execution on a new, empty
+external-volume destination. Never run the transfer commands from the local project workspace.
 
-## Already prepared locally
+## Completed evidence and safeguards
 
 - All three dataset repositories and immutable revisions are pinned in
   `configs/datasets/registry.yaml`.
@@ -20,8 +22,9 @@ instance with larger storage and explicitly confirms the transfer in that sessio
   rejection ledger.
 - `data/` is Git-ignored, and materialization/audit paths stream records instead of loading an
   entire snapshot into memory.
-- No full snapshot, model weight, checkpoint, or generated training artifact is present or
-  required for plan activation.
+- No full snapshot, model weight, checkpoint, or generated training artifact is committed to
+  the project workspace. The three real snapshots and their receipt/audit/rejection/lineage
+  bundles are retained on the external persistent volume.
 
 ## Large-storage host preflight
 
@@ -40,9 +43,11 @@ Before any transfer:
    the repository or logs.
 6. Obtain explicit current-session confirmation for the exact sources and destination volume.
 
-## Future execution
+## Controlled re-execution only
 
-Run one source at a time so capacity and integrity can be checked between transfers:
+Do not run these commands against the completed paths. After fresh current-session confirmation,
+run one source at a time into new, empty destinations so capacity and integrity can be checked
+between transfers:
 
 ```bash
 ./scripts/download_datasets.sh \
@@ -89,10 +94,11 @@ attest ignored repository metadata or unsupported formats. Private staging isola
 from ordinary changes to the original source path; it is not a sandbox against a hostile process
 running under the same OS account.
 
-Do not begin normalization, contamination freezing, or pilot construction until the core audit
-reports `PASS` and the remaining Phase 0/decontamination work is complete. Tokenizer-based
-trajectory lengths, exact/near patch duplication, public-evaluation overlap, unique issue/PR
-counts, and harness/model distributions are not established by this command.
+The core audit prerequisite now reports `PASS` for all three pinned sources. Do not begin pilot
+construction or paid training until the remaining Phase 0/decontamination work is complete.
+Tokenizer-based trajectory lengths, exact/near patch duplication, public-evaluation overlap,
+unique issue/PR counts, and harness/model distributions are not established by this command and
+remain `NOT RUN`.
 
 ## Stop conditions
 

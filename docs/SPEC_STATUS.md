@@ -15,28 +15,35 @@ context limits where verified. These are metadata claims only.
   bake-off, then select and train a student;
 - no scaling of teacher generation or full fine-tuning before the pilot evidence gates pass.
 
-## Prepared locally, not run on source data
+## Real-source core snapshot audit complete
 
 The offline complete-snapshot input and lineage contracts are implemented and exercised against
 synthetic JSONL/Parquet fixtures. A transfer receipt binds the pinned source and raw registry to
 the sorted local data-file inventory; audit parses a matching private staged view and explicitly
 labels its aggregate input identity in a `nodelm.dataset-audit/v2` report. Lineage binds the
 receipt, logical rows, report, and complete rejection ledger, and each immutable publication
-refuses dependency drift. This is contract evidence only: no real snapshot has been transferred
-or audited, and no per-source receipt or lineage artifact exists.
+refuses dependency drift.
+
+All three pinned real snapshots have now been transferred to external persistent storage. Their
+receipt-bound complete-snapshot audits and lineage manifests report `PASS` across 726,203 rows
+and 49,734,682,463 supported bytes, with 33,937 license-gate rejections retained in complete
+ledgers. The compact digest-bound evidence index is
+`artifacts/reports/FULL_DATASET_AUDIT.md`; the raw snapshots and evidence remain outside Git.
+This completes the core snapshot-audit prerequisite, not normalization or decontamination.
 
 ## Still open by design
 
 - the winning student, precision, inference backend, and training framework;
 - candidate load/generate compatibility and the same-harness 50–100-task bake-off;
 - the frozen public/private evaluation manifests and measured near-duplicate threshold;
-- real full-snapshot audit results and per-source lineage artifacts;
 - unique issue/PR counts, harness/model distributions, tokenizer-based trajectory lengths,
   exact/near patch duplication, and public-evaluation overlap;
+- real-source normalization, contamination-safe split freezing, and pilot construction;
 - the Tier A–D quality policy and actual 10k pilot artifact;
-- model memory profiles, training topology, and any paid infrastructure request.
+- model memory profiles and training topology. A paid host has been used for data work, but no
+  strict model lifecycle or training measurement has run.
 
-Model metadata and offline synthetic contract verification are `PASS`; model execution,
-bake-off, real snapshot transfer/audit/lineage, and training are `NOT RUN`. Full dataset transfer
-is deferred to a user-provisioned large-storage GPU instance and follows
-`docs/DATA_DOWNLOAD_RUNBOOK.md`.
+Model metadata, offline synthetic contract verification, and receipt-bound transfer/core
+audit/lineage for all three real sources are `PASS`. Normalization, decontamination, split and
+pilot construction, model execution, bake-off, student selection, and training remain
+`NOT RUN`. Recovery or re-execution follows `docs/DATA_DOWNLOAD_RUNBOOK.md`.

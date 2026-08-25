@@ -42,12 +42,14 @@ public benchmark and strictly positive near-duplicate threshold are mandatory CL
 the plan leaves both the benchmark inputs and measured threshold unfrozen, so they cannot be
 guessed. The convenience in-memory Python API has an explicit row limit.
 
-The source-level lineage status covers the core local snapshot audit only. The current
-`trajectory_lengths` report measures trajectory steps, not tokenizer tokens. Unique issue/PR
-counts, harness and generating-model distributions, tokenizer-based lengths, exact/near patch
-duplication, and public-evaluation overlap remain explicitly `NOT RUN`; synthetic fixture
-evidence is not a real-source audit. Per-example lineage is added later by strict normalized
-samples and remains distinct from this source-level artifact binding.
+The receipt-bound core snapshot audits and source-level lineage manifests now report `PASS` for
+all three pinned real sources; see `artifacts/reports/FULL_DATASET_AUDIT.md`. That status covers
+only complete-snapshot identity, parsing, counts, license-gate ledgers, and bound lineage. The
+current `trajectory_lengths` report measures trajectory steps, not tokenizer tokens. Unique
+issue/PR counts, harness and generating-model distributions, tokenizer-based lengths,
+exact/near patch duplication, and public-evaluation overlap remain explicitly `NOT RUN`.
+Per-example lineage is added later by strict normalized samples and remains distinct from this
+source-level artifact binding.
 
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

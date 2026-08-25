@@ -23,6 +23,19 @@ Overall status: `NOT RUN`
 | Training | Initial step/checkpoint/reload/resumed step | NOT RUN | Requires verified model and GPU host |
 | Evaluation | Fixture task through model and harness | NOT RUN | Requires verified model adapter |
 
-GO / NO-GO: `NO-GO` for paid training. First complete the full-snapshot audit and contamination
-freeze, deterministic common harness, candidate load/generate checks, 50–100-task bake-off, and
-a measured one-step memory profile for the selected student.
+## Dataset audit update — 2026-08-24
+
+After the original readiness snapshot above, all three pinned real dataset snapshots were
+transferred to external persistent storage and their receipt-bound core audits and lineage
+manifests reported `PASS`: 726,203 rows across 49,734,682,463 supported bytes. See
+`artifacts/reports/FULL_DATASET_AUDIT.md` for the bound revisions and digests. This supersedes the
+Dataset row only for full transfer and core snapshot audit. Normalization, tokenizer-based
+measurements, decontamination, split freezing, and pilot construction remain `NOT RUN`.
+
+An RTX PRO 6000 host is available and has been observed for data work, but the strict remote
+model lifecycle, candidate load/generate checks, training, and evaluation remain `NOT RUN`.
+Accordingly the overall First Verification status and training decision below are unchanged.
+
+GO / NO-GO: `NO-GO` for paid training. First complete real-source normalization and the
+contamination freeze, deterministic common harness, candidate load/generate checks, 50–100-task
+bake-off, and a measured one-step memory profile for the selected student.

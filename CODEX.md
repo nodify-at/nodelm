@@ -27,10 +27,11 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   integrity-attested oracle it remains `UNVERIFIED`.
 - Never commit credentials, raw private keys, generated datasets, model weights, checkpoints,
   or measured artifacts that contain sensitive source data.
-- Full dataset snapshots are deliberately deferred until the user provisions a GPU instance
-  with larger storage. Metadata checks, contracts, and preflight preparation are allowed, but
-  do not start a full snapshot transfer or bulk materialization without explicit confirmation
-  in the current session. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` on the future host.
+- All three pinned dataset snapshots and their receipt-bound core audits and lineage are complete
+  on external persistent storage; no re-download is currently required. Raw evidence is indexed
+  by `artifacts/reports/FULL_DATASET_AUDIT.md`; normalization and decontamination remain `NOT RUN`.
+  Require explicit current-session authorization for recovery or re-execution into new, empty
+  destinations and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md`.
 - Treat `complete-snapshot` as an input-scope claim: it covers all supported JSONL/Parquet data
   files discovered at the supplied local path. It does not mean the plan's Phase 0 is complete,
   and a synthetic fixture `PASS` is never a real-source audit or lineage result.

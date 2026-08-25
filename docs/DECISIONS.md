@@ -117,3 +117,10 @@ The lineage status mirrors the core snapshot audit and may retain truthful `FAIL
 synthetic-fixture `PASS` proves only this contract. It does not complete Phase 0, attest an
 untransferred source, measure tokenizer-based trajectory length, perform patch decontamination,
 or establish public-evaluation overlap.
+
+Execution note (2026-08-24): after explicit authorization and provisioning of persistent
+large-volume storage, all three pinned snapshots were transferred and their receipt-bound core
+audits and lineage manifests passed. This fulfills the deferred transfer/core-audit portion of
+D-013; bulk materialization and the remaining Phase 0/decontamination gates remain `NOT RUN`.
+The snapshots and complete raw evidence stay on external persistent storage, while Git tracks
+their compact digest index in `artifacts/reports/FULL_DATASET_AUDIT.md`.

@@ -25,6 +25,7 @@ artifacts/manifests/*
 !artifacts/manifests/datasets.json
 !artifacts/reports/student-bakeoff.md
 !artifacts/reports/FIRST_VERIFICATION.md
+!artifacts/reports/FULL_DATASET_AUDIT.md
 
 data/
 checkpoints/

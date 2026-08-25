@@ -31,10 +31,12 @@ uv sync --extra training --group dev
 
 ## Common workflows
 
-Full dataset transfer is intentionally deferred until a large-storage GPU instance is
-provisioned. [`docs/DATA_DOWNLOAD_RUNBOOK.md`](docs/DATA_DOWNLOAD_RUNBOOK.md) is the sole
-full-transfer procedure: run it only on that future host, with its absolute external-volume
-destinations and explicit current-session confirmation. Local contract development and
+The three pinned dataset snapshots have been transferred to external persistent storage and
+their receipt-bound core audits and lineage manifests are `PASS`; the compact evidence index is
+[`artifacts/reports/FULL_DATASET_AUDIT.md`](artifacts/reports/FULL_DATASET_AUDIT.md). The raw
+snapshots and evidence remain outside Git. [`docs/DATA_DOWNLOAD_RUNBOOK.md`](docs/DATA_DOWNLOAD_RUNBOOK.md)
+is the sole recovery or re-execution procedure and still requires an absolute external-volume
+destination plus explicit current-session confirmation. Local contract development and
 synthetic verification require no full snapshot.
 
 ```bash
@@ -44,9 +46,9 @@ uv run nodelm datasets validate
 # Check the pinned revision and dataset-card license against the live Hub.
 ./scripts/verify_datasets.sh
 
-# Future large-storage host only: audit an already-transferred snapshot offline. This command
-# does not download data or contact the Hub. It requires the immutable receipt emitted by the
-# guarded download and uses temporary private staging on the large volume.
+# External-volume recovery/re-audit only: audit an already-transferred snapshot offline. This
+# command does not download data or contact the Hub. It requires the immutable receipt emitted
+# by the guarded download and uses temporary private staging on the large volume.
 uv run nodelm datasets audit-snapshot \
   --source open-swe-traces \
   --snapshot /large-volume/nodelm/snapshots/open-swe-traces \
@@ -107,8 +109,9 @@ See [CODEX.md](CODEX.md) for future agent-development rules and
 ## Specification status
 
 `NodeLM_TypeScript_Node_Distillation_Plan.md` is now the tracked project ground truth. Its three
-student candidates and primary teacher are pinned in strict metadata contracts. Metadata is
-`PASS`, and the offline snapshot/lineage contract passes synthetic fixtures. Model execution,
-the 50–100-task candidate bake-off, student selection, real dataset transfer and per-source
-audit/lineage results, and training remain `NOT RUN`. See
+student candidates and primary teacher are pinned in strict metadata contracts. Metadata,
+offline synthetic contract verification, and the real receipt-bound transfer/core audit/lineage
+for all three sources are `PASS`. Normalization, decontamination, split and pilot construction,
+model execution, the 50–100-task candidate bake-off, student selection, and training remain
+`NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

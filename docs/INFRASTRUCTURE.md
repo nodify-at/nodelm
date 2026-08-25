@@ -19,11 +19,18 @@ an explicit `UNAVAILABLE` or `NOT_APPLICABLE` availability value. A successful a
 query may truthfully report that an optional fabric is unavailable; that is evidence, not a
 fabric-performance claim. No NCCL or RDMA benchmark is implied by discovery alone.
 
-No infrastructure request is issued yet. The plan identifies three candidates, but the student
-is not selected and real load/training memory has not been measured. Any training GPU
-recommendation is therefore `BLOCKED`, not inferred from marketing capacity. Full dataset
-transfer is also deferred until the user provisions a GPU instance with larger storage; the
-preflight and stop conditions are recorded in `docs/DATA_DOWNLOAD_RUNBOOK.md`.
+A user-provisioned Runpod host was used on 2026-08-24/25 for external-volume data work. The
+current host observation reports an NVIDIA RTX PRO 6000 Blackwell Server Edition with 97,887
+MiB VRAM, about 283 GB cgroup memory, a 13.6-core CPU quota, a 1 TB container disk, and the
+correct persistent network volume mounted read/write at `/workspace`. The core dataset transfer
+and audit used CPU/storage; it did not require or exercise the GPU. The persistent evidence is
+indexed by `artifacts/reports/FULL_DATASET_AUDIT.md`.
+
+This host observation is not the strict `remote_verify.sh` lifecycle and makes no training
+compatibility or performance claim. The student is not selected; no candidate weights were
+loaded, no forward/backward step ran, and real model memory has not been measured. A training
+GPU recommendation therefore remains `BLOCKED`, not inferred from nominal VRAM. Recovery and
+re-execution stop conditions remain in `docs/DATA_DOWNLOAD_RUNBOOK.md`.
 
 SSH inputs, when needed, are limited to host/IP, username, non-standard port, and a local key
 path or configured alias. Never request private-key contents, weaken host-key checking, modify
