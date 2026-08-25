@@ -30,6 +30,67 @@ def test_snapshot_rows_stream_from_sorted_jsonl_and_parquet_files(tmp_path: Path
     assert [row["instance_id"] for row in rows] == ["one", "two"]
 
 
+def test_snapshot_rows_project_nested_columns_without_loading_other_fields(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    parquet.write_table(
+        pa.table(
+            {
+                "instance_id": ["one"],
+                "trajectory": [[{"role": "assistant", "content": "large trace"}]],
+                "metadata": [
+                    {
+                        "model_patch": {"patch": "diff --git a/a.ts b/a.ts\n+fix();\n"},
+                        "reference_patch": {"patch": "must not cross projection"},
+                    }
+                ],
+            }
+        ),
+        snapshot / "data.parquet",
+    )
+
+    rows = tuple(
+        iter_snapshot_rows(
+            discover_snapshot_files(snapshot),
+            columns=("instance_id", "metadata.model_patch.patch"),
+        )
+    )
+
+    assert rows == (
+        {
+            "instance_id": "one",
+            "metadata": {"model_patch": {"patch": "diff --git a/a.ts b/a.ts\n+fix();\n"}},
+        },
+    )
+
+
+def test_parquet_projection_rejects_missing_nested_columns(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    parquet.write_table(
+        pa.table(
+            {
+                "instance_id": ["one"],
+                "metadata": [{"model_patch": {"other": "not-the-requested-patch"}}],
+            }
+        ),
+        snapshot / "data.parquet",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"missing projected column.*metadata\.model_patch\.patch",
+    ):
+        tuple(
+            iter_snapshot_rows(
+                discover_snapshot_files(snapshot),
+                columns=("instance_id", "metadata.model_patch.patch"),
+            )
+        )
+
+
 def test_snapshot_patterns_cannot_escape_the_snapshot(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()

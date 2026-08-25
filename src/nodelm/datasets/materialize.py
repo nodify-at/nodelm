@@ -57,22 +57,58 @@ def discover_snapshot_files(
     return tuple(sorted(selected))
 
 
-def iter_snapshot_rows(paths: tuple[Path, ...]) -> Iterator[dict[str, Any]]:
-    """Stream records from deterministic JSONL or Parquet snapshot files."""
+def iter_snapshot_rows(
+    paths: tuple[Path, ...],
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Stream records, optionally projecting a deterministic set of nested columns."""
 
     if not paths:
         raise ValueError("at least one snapshot data file is required")
+    if columns is not None and (
+        not columns
+        or len(columns) != len(set(columns))
+        or any(
+            not column or column != column.strip() or any(not part for part in column.split("."))
+            for column in columns
+        )
+    ):
+        raise ValueError("projected columns must be unique non-empty dotted paths")
     for path in paths:
         suffix = path.suffix.casefold()
         if suffix == ".jsonl":
-            yield from _iter_jsonl(path)
+            yield from _iter_jsonl(path, columns=columns)
         elif suffix == ".parquet":
-            yield from _iter_parquet(path)
+            yield from _iter_parquet(path, columns=columns)
         else:
             raise ValueError(f"unsupported snapshot data file: {path}")
 
 
-def _iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+def _project_mapping(value: Mapping[str, Any], columns: tuple[str, ...]) -> dict[str, Any]:
+    projected: dict[str, Any] = {}
+    for column in columns:
+        parts = column.split(".")
+        source: Any = value
+        for part in parts:
+            if not isinstance(source, Mapping) or part not in source:
+                raise ValueError(f"snapshot row is missing projected column: {column}")
+            source = source[part]
+        destination = projected
+        for part in parts[:-1]:
+            child = destination.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"projected columns overlap incompatibly: {column}")
+            destination = child
+        destination[parts[-1]] = source
+    return projected
+
+
+def _iter_jsonl(
+    path: Path,
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> Iterator[dict[str, Any]]:
     with path.open(encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
             if not line.strip():
@@ -83,13 +119,31 @@ def _iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
                 raise ValueError(f"invalid JSON in {path}:{line_number}: {error.msg}") from error
             if not isinstance(value, dict):
                 raise ValueError(f"snapshot row is not an object: {path}:{line_number}")
-            yield value
+            yield value if columns is None else _project_mapping(value, columns)
 
 
-def _iter_parquet(path: Path) -> Iterator[dict[str, Any]]:
+def _iter_parquet(
+    path: Path,
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> Iterator[dict[str, Any]]:
     try:
         source = parquet.ParquetFile(path)
-        for batch in source.iter_batches(batch_size=1_024):
+        if columns is not None:
+            leaf_paths = tuple(
+                source.schema.column(index).path for index in range(len(source.schema))
+            )
+            missing = tuple(
+                column
+                for column in columns
+                if not any(
+                    leaf_path == column or leaf_path.startswith(f"{column}.")
+                    for leaf_path in leaf_paths
+                )
+            )
+            if missing:
+                raise ValueError("snapshot row is missing projected column: " + ", ".join(missing))
+        for batch in source.iter_batches(batch_size=1_024, columns=columns):
             for value in batch.to_pylist():
                 if not isinstance(value, Mapping):  # pragma: no cover - Arrow table contract
                     raise ValueError(f"snapshot row is not a mapping: {path}")

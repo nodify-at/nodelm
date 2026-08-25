@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from nodelm.provenance.manifests import (
     NormalizationManifestV2,
+    ResolutionRecoveryManifestV1,
     SnapshotMaterializationManifestV1,
     SnapshotMaterializationManifestV2,
     TaskProvenanceProjectionManifestV1,
@@ -142,6 +143,83 @@ def _normalization() -> dict[str, Any]:
     }
 
 
+def _resolution_recovery() -> dict[str, Any]:
+    return {
+        "schema_version": "nodelm.resolution-recovery/v1",
+        "derivation_status": "PASS",
+        "admission_status": "BLOCKED",
+        "admission_blocker": "harness_canary_pending",
+        "source_name": "fixture-traces",
+        "source_repository_id": "owner/fixture-traces",
+        "source_revision": "a" * 40,
+        "task_source_name": "fixture-tasks",
+        "task_source_revision": "1" * 40,
+        "partition_contract_sha256": "b" * 64,
+        "partition_contract_bytes": 1_000,
+        "transfer_receipt_sha256": "c" * 64,
+        "transfer_receipt_bytes": 2_000,
+        "labeled_partitions": [
+            {
+                "partition_name": "openhands/model-a/tasks",
+                "row_count": 8,
+                "files": [_file("data/openhands/model-a/tasks/part-0.parquet")],
+            },
+            {
+                "partition_name": "swe-agent/model-a/tasks",
+                "row_count": 12,
+                "files": [_file("data/swe-agent/model-a/tasks/part-0.parquet")],
+            },
+        ],
+        "target_partitions": [
+            {
+                "partition_name": "openhands/model-b/tasks",
+                "row_count": 9,
+                "files": [_file("data/openhands/model-b/tasks/part-0.parquet")],
+            },
+            {
+                "partition_name": "swe-agent/model-b/tasks",
+                "row_count": 11,
+                "files": [_file("data/swe-agent/model-b/tasks/part-0.parquet")],
+            },
+        ],
+        "language_filter": ["JavaScript", "TypeScript"],
+        "candidate_artifact": "resolution-candidates.jsonl",
+        "candidate_sha256": "2" * 64,
+        "candidate_bytes": 2_000,
+        "queue_artifact": "resolution-queue.jsonl",
+        "queue_sha256": "3" * 64,
+        "queue_bytes": 3_000,
+        "target_row_count": 20,
+        "ineligible_row_count": 3,
+        "already_known_row_count": 2,
+        "candidate_row_count": 5,
+        "candidate_unique_count": 4,
+        "candidate_resolved_count": 3,
+        "candidate_unresolved_count": 2,
+        "queued_fanout_row_count": 10,
+        "queue_unique_count": 8,
+        "conflict_count": 0,
+    }
+
+
+def _resolution_recovery_with_empty_outputs() -> dict[str, Any]:
+    payload = _resolution_recovery()
+    payload.update(
+        {
+            "ineligible_row_count": 18,
+            "candidate_row_count": 0,
+            "candidate_unique_count": 0,
+            "candidate_resolved_count": 0,
+            "candidate_unresolved_count": 0,
+            "queued_fanout_row_count": 0,
+            "queue_unique_count": 0,
+            "candidate_bytes": 0,
+            "queue_bytes": 0,
+        }
+    )
+    return payload
+
+
 @pytest.mark.parametrize(
     ("model", "payload_factory"),
     [
@@ -149,6 +227,7 @@ def _normalization() -> dict[str, Any]:
         (SnapshotMaterializationManifestV2, _materialization_v2),
         (TaskProvenanceProjectionManifestV1, _task_projection),
         (NormalizationManifestV2, _normalization),
+        (ResolutionRecoveryManifestV1, _resolution_recovery),
     ],
 )
 def test_manifest_models_round_trip_producer_payloads(
@@ -176,6 +255,7 @@ def test_materialization_v2_preserves_a_blocked_normalization_partition() -> Non
         (SnapshotMaterializationManifestV2, _materialization_v2),
         (TaskProvenanceProjectionManifestV1, _task_projection),
         (NormalizationManifestV2, _normalization),
+        (ResolutionRecoveryManifestV1, _resolution_recovery),
     ],
 )
 def test_manifest_models_forbid_extra_fields(
@@ -198,6 +278,8 @@ def test_manifest_models_forbid_extra_fields(
         (TaskProvenanceProjectionManifestV1, _task_projection, "registry_bytes", 321.0),
         (NormalizationManifestV2, _normalization, "accepted_count", True),
         (NormalizationManifestV2, _normalization, "normalized_bytes", 700.0),
+        (ResolutionRecoveryManifestV1, _resolution_recovery, "candidate_row_count", True),
+        (ResolutionRecoveryManifestV1, _resolution_recovery, "queue_bytes", 3_000.0),
     ],
 )
 def test_manifest_models_reject_bool_and_float_counts(
@@ -264,6 +346,36 @@ def test_manifest_models_reject_bool_and_float_counts(
             {"duplicate_trace_row_count": 1},
             "duplicate_trace_row_count",
         ),
+        (
+            ResolutionRecoveryManifestV1,
+            _resolution_recovery,
+            {"ineligible_row_count": 4},
+            "target recovery accounting",
+        ),
+        (
+            ResolutionRecoveryManifestV1,
+            _resolution_recovery,
+            {"candidate_resolved_count": 4},
+            "candidate outcome counts",
+        ),
+        (
+            ResolutionRecoveryManifestV1,
+            _resolution_recovery,
+            {"candidate_unique_count": 6},
+            "candidate_unique_count",
+        ),
+        (
+            ResolutionRecoveryManifestV1,
+            _resolution_recovery,
+            {"queue_unique_count": 11},
+            "queue_unique_count",
+        ),
+        (
+            ResolutionRecoveryManifestV1,
+            _resolution_recovery,
+            {"conflict_count": 1},
+            "conflict_count",
+        ),
     ],
 )
 def test_manifest_models_reject_inconsistent_scope_status_and_counts(
@@ -277,3 +389,103 @@ def test_manifest_models_reject_inconsistent_scope_status_and_counts(
 
     with pytest.raises(ValidationError, match=message):
         model.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"derivation_status": "FAIL"}, "derivation_status"),
+        ({"admission_status": "PASS"}, "admission_status"),
+        ({"admission_blocker": "none"}, "admission_blocker"),
+    ],
+)
+def test_resolution_recovery_manifest_is_never_training_admissible(
+    updates: dict[str, Any],
+    message: str,
+) -> None:
+    payload = _resolution_recovery()
+    payload.update(updates)
+
+    with pytest.raises(ValidationError, match=message):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+def test_resolution_recovery_manifest_rejects_unsupported_language_filter() -> None:
+    payload = _resolution_recovery()
+    payload["language_filter"] = ["Python"]
+
+    with pytest.raises(ValidationError):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ["candidate_bytes", "queue_bytes"])
+def test_resolution_recovery_manifest_requires_bytes_for_nonempty_artifacts(field: str) -> None:
+    payload = _resolution_recovery()
+    payload[field] = 0
+
+    with pytest.raises(ValidationError, match="bytes must be zero exactly when"):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ["candidate_bytes", "queue_bytes"])
+def test_resolution_recovery_manifest_rejects_bytes_for_empty_artifacts(field: str) -> None:
+    payload = _resolution_recovery_with_empty_outputs()
+    payload[field] = 1
+
+    with pytest.raises(ValidationError, match="bytes must be zero exactly when"):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "candidate_row_count": 0,
+            "candidate_unique_count": 1,
+            "candidate_resolved_count": 0,
+            "candidate_unresolved_count": 0,
+            "queued_fanout_row_count": 15,
+        },
+        {"queue_unique_count": 0},
+    ],
+)
+def test_resolution_recovery_manifest_rejects_inconsistent_zero_counts(
+    updates: dict[str, Any],
+) -> None:
+    payload = _resolution_recovery()
+    payload.update(updates)
+
+    with pytest.raises(ValidationError, match="unique count must be zero exactly when"):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+def test_resolution_recovery_manifest_binds_all_target_rows() -> None:
+    payload = _resolution_recovery()
+    payload["target_partitions"][0]["row_count"] = 8
+
+    with pytest.raises(ValidationError, match="target partition rows"):
+        ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+def test_resolution_recovery_manifest_is_immutable() -> None:
+    manifest = ResolutionRecoveryManifestV1.model_validate(_resolution_recovery())
+
+    with pytest.raises(ValidationError, match="frozen"):
+        manifest.target_row_count = 21
+
+
+def test_resolution_recovery_manifest_allows_terminal_empty_outputs() -> None:
+    payload = _resolution_recovery_with_empty_outputs()
+
+    manifest = ResolutionRecoveryManifestV1.model_validate(payload)
+
+    assert manifest.derivation_status == "PASS"
+    assert manifest.admission_status == "BLOCKED"
+
+
+def test_resolution_partition_input_rejects_bool_row_count() -> None:
+    payload = _resolution_recovery()
+    payload["target_partitions"][0]["row_count"] = True
+
+    with pytest.raises(ValidationError):
+        ResolutionRecoveryManifestV1.model_validate(payload)

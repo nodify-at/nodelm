@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, cast
 
 import typer
 import yaml
@@ -24,7 +24,11 @@ from nodelm.datasets.audit import audit_rows, iter_license_rejections
 from nodelm.datasets.hub import download_pinned_snapshot, verify_hub_source
 from nodelm.datasets.lineage import DatasetSnapshotTransferReceipt
 from nodelm.datasets.materialize import discover_snapshot_files, iter_snapshot_rows
-from nodelm.datasets.partitions import PartitionContractError, TracePartitionContract
+from nodelm.datasets.partitions import (
+    PartitionContractError,
+    TracePartition,
+    TracePartitionContract,
+)
 from nodelm.datasets.pilot import (
     PilotAuthorizationError,
     PilotFilter,
@@ -32,7 +36,7 @@ from nodelm.datasets.pilot import (
     build_pilot_subset,
     require_authorized_pilot_manifest,
 )
-from nodelm.datasets.registry import DatasetRegistry
+from nodelm.datasets.registry import DatasetRegistry, RegistryError
 from nodelm.datasets.seals import SnapshotSealError, require_authorized_snapshot_seal
 from nodelm.datasets.snapshot_audit import (
     SnapshotAuditError,
@@ -90,7 +94,11 @@ from nodelm.provenance.gold import (
 )
 from nodelm.provenance.manifests import (
     TASK_PROVENANCE_SAFE_FIELDS,
+    ManifestFileIdentity,
     NormalizationManifestV2,
+    ResolutionLanguage,
+    ResolutionPartitionInput,
+    ResolutionRecoveryManifestV1,
     SnapshotMaterializationManifestV1,
     SnapshotMaterializationManifestV2,
     TaskProvenanceProjectionManifestV1,
@@ -105,7 +113,15 @@ from nodelm.provenance.pipeline import (
     task_metadata_index,
     trace_rollout_key,
 )
-from nodelm.provenance.task_provenance import task_provenance_projection
+from nodelm.provenance.resolution import (
+    ResolutionRecoveryError,
+    build_resolution_recovery,
+)
+from nodelm.provenance.task_provenance import (
+    TaskProjectionError,
+    canonical_language,
+    task_provenance_projection,
+)
 from nodelm.provenance.trace_projection import (
     TraceProjectionError,
     trace_normalization_projection,
@@ -707,6 +723,416 @@ def datasets_materialize(
     )
     if row_count == 0:
         raise typer.Exit(code=1)
+
+
+@datasets_app.command("build-resolution-recovery")
+def datasets_build_resolution_recovery(
+    source_name: str = typer.Option(..., "--source"),
+    snapshot: Path = typer.Option(..., "--snapshot", exists=True),
+    partition_contract: Path = typer.Option(
+        ..., "--partition-contract", exists=True, dir_okay=False
+    ),
+    transfer_receipt: Path = typer.Option(..., "--transfer-receipt", exists=True, dir_okay=False),
+    labeled_partition: list[str] | None = typer.Option(None, "--labeled-partition"),
+    target_partition: list[str] | None = typer.Option(None, "--target-partition"),
+    language: list[str] | None = typer.Option(None, "--language"),
+    candidates_output: Path = typer.Option(..., "--candidates-output", dir_okay=False),
+    queue_output: Path = typer.Option(..., "--queue-output", dir_okay=False),
+    manifest_output: Path = typer.Option(..., "--manifest-output", dir_okay=False),
+    config: Path = typer.Option(Path("configs/datasets/registry.yaml"), exists=True),
+) -> None:
+    """Build exact-label candidates and a blocked evaluator queue from sealed leaves."""
+
+    labeled_names = tuple(labeled_partition or ())
+    target_names = tuple(target_partition or ())
+    if not labeled_names or not target_names:
+        raise typer.BadParameter(
+            "at least one --labeled-partition and --target-partition are required"
+        )
+    if len(labeled_names) != len(set(labeled_names)):
+        raise typer.BadParameter("--labeled-partition values must be unique")
+    if len(target_names) != len(set(target_names)):
+        raise typer.BadParameter("--target-partition values must be unique")
+    if set(labeled_names) & set(target_names):
+        raise typer.BadParameter("labeled and target partitions must be disjoint")
+    output_paths = {
+        candidates_output.resolve(),
+        queue_output.resolve(),
+        manifest_output.resolve(),
+    }
+    if len(output_paths) != 3:
+        raise typer.BadParameter("candidate, queue, and manifest outputs must be distinct")
+
+    language_values = tuple(language or ("TypeScript", "JavaScript"))
+    try:
+        canonical_languages = cast(
+            tuple[ResolutionLanguage, ...],
+            tuple(sorted({canonical_language(item) for item in language_values})),
+        )
+    except TaskProjectionError as error:
+        raise typer.BadParameter(f"invalid resolution language: {error}") from error
+    if not canonical_languages or any(
+        item not in {"TypeScript", "JavaScript"} for item in canonical_languages
+    ):
+        raise typer.BadParameter("resolution recovery only supports TypeScript and JavaScript")
+
+    registry, config_identity = _load_registry_with_identity(config)
+    try:
+        source = registry.by_name(source_name)
+    except RegistryError as error:
+        raise typer.BadParameter(str(error)) from error
+    if source.status is not VerificationStatus.PASS or source.revision is None:
+        raise typer.BadParameter(
+            "resolution recovery requires a registry-verified pinned trace source"
+        )
+    trace_revision = source.revision
+
+    try:
+        contract_payload = partition_contract.read_bytes()
+        contract_identity = (content_digest(contract_payload), len(contract_payload))
+        contract = TracePartitionContract.from_bytes(contract_payload)
+        contract.require_source(source.name, trace_revision)
+        contract.require_authorized_digest(contract_identity[0])
+        if contract.source_repository_id != source.repository_id:
+            raise PartitionContractError(
+                "partition contract repository does not match the dataset registry"
+            )
+        if contract.sealed_registry_sha256 != config_identity[0]:
+            raise PartitionContractError(
+                "partition contract registry digest does not match --config"
+            )
+        receipt_payload = transfer_receipt.read_bytes()
+        receipt_identity = (content_digest(receipt_payload), len(receipt_payload))
+        receipt = contract.bind_transfer_receipt(receipt_payload)
+        if (
+            receipt.source != source
+            or receipt.registry_sha256 != config_identity[0]
+            or receipt.registry_bytes != config_identity[1]
+        ):
+            raise PartitionContractError(
+                "transfer receipt does not match the pinned registry source"
+            )
+        require_authorized_snapshot_seal(
+            source_name=source.name,
+            source_revision=trace_revision,
+            transfer_receipt_sha256=receipt_identity[0],
+            snapshot_sha256=receipt.snapshot.snapshot_sha256,
+            snapshot_file_count=len(receipt.snapshot.files),
+        )
+        labeled_partitions = tuple(
+            sorted(
+                (contract.by_name(name) for name in labeled_names),
+                key=lambda partition: partition.name,
+            )
+        )
+        target_partitions = tuple(
+            sorted(
+                (contract.by_name(name) for name in target_names),
+                key=lambda partition: partition.name,
+            )
+        )
+    except (OSError, PartitionContractError, SnapshotSealError) as error:
+        raise typer.BadParameter(f"invalid resolution partition evidence: {error}") from error
+
+    selected_partitions = (*labeled_partitions, *target_partitions)
+    blocked_partitions = tuple(
+        partition.name
+        for partition in selected_partitions
+        if partition.normalization_status is not VerificationStatus.PASS
+    )
+    if blocked_partitions:
+        raise typer.BadParameter(
+            "resolution recovery requires PASS partitions: " + ", ".join(sorted(blocked_partitions))
+        )
+    task_bindings = {
+        (partition.task_source_name, partition.task_source_revision)
+        for partition in selected_partitions
+    }
+    if len(task_bindings) != 1:
+        raise typer.BadParameter("all selected partitions must bind the same pinned task source")
+    task_source_name, task_source_revision = next(iter(task_bindings))
+    if task_source_name is None or task_source_revision is None:  # pragma: no cover - PASS model
+        raise typer.BadParameter("selected PASS partitions lack pinned task source evidence")
+    try:
+        task_source = registry.by_name(task_source_name)
+    except RegistryError as error:
+        raise typer.BadParameter(str(error)) from error
+    if (
+        task_source.status is not VerificationStatus.PASS
+        or task_source.revision is None
+        or task_source.revision.casefold() != task_source_revision.casefold()
+    ):
+        raise typer.BadParameter(
+            "selected partitions' task source is not registry-verified at its revision"
+        )
+    canonical_task_revision = task_source.revision
+
+    receipt_files_by_partition = {
+        partition.name: tuple(
+            identity
+            for identity in receipt.snapshot.files
+            if any(
+                PurePosixPath(identity.path).match(pattern) for pattern in partition.file_patterns
+            )
+        )
+        for partition in selected_partitions
+    }
+    if any(not identities for identities in receipt_files_by_partition.values()):
+        raise typer.BadParameter("a selected partition has no receipt-bound snapshot files")
+    selected_receipt_files = tuple(
+        sorted(
+            (
+                identity
+                for partition in selected_partitions
+                for identity in receipt_files_by_partition[partition.name]
+            ),
+            key=lambda identity: identity.path,
+        )
+    )
+    selected_paths = tuple(identity.path for identity in selected_receipt_files)
+    if len(selected_paths) != len(set(selected_paths)):
+        raise typer.BadParameter("selected partition files overlap in the transfer receipt")
+    expected_by_path = {
+        identity.path: (identity.sha256, identity.bytes) for identity in selected_receipt_files
+    }
+    selected_patterns = tuple(
+        sorted(
+            {pattern for partition in selected_partitions for pattern in partition.file_patterns}
+        )
+    )
+    try:
+        snapshot_inputs = _receipt_bound_snapshot_files(
+            snapshot,
+            expected_by_path=expected_by_path,
+            patterns=selected_patterns,
+        )
+    except (OSError, ValueError) as error:
+        raise typer.BadParameter(f"invalid resolution snapshot: {error}") from error
+    original_snapshot_paths = tuple(path for path, _ in snapshot_inputs)
+    resolved_snapshot = snapshot.resolve()
+    snapshot_root = resolved_snapshot if resolved_snapshot.is_dir() else resolved_snapshot.parent
+    if (
+        tuple(path.relative_to(snapshot_root).as_posix() for path in original_snapshot_paths)
+        != selected_paths
+    ):
+        raise typer.BadParameter("resolution snapshot input ordering is inconsistent")
+
+    def verify_inputs() -> None:
+        try:
+            current_files = discover_snapshot_files(snapshot, patterns=selected_patterns)
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
+        if current_files != original_snapshot_paths:
+            raise typer.BadParameter(
+                "resolution snapshot file set changed while it was being processed"
+            )
+        for path, identity in snapshot_inputs:
+            _require_unchanged_file(path, identity)
+        _require_unchanged_file(config, config_identity)
+        _require_unchanged_file(partition_contract, contract_identity)
+        _require_unchanged_file(transfer_receipt, receipt_identity)
+
+    projected_columns = (
+        "instance_id",
+        "trajectory_id",
+        "resolved",
+        "language",
+        "hf_dataset_name",
+        "metadata.model_patch.patch",
+    )
+    manifest_parent = manifest_output.resolve().parent
+    try:
+        with verified_staged_files(snapshot_inputs) as staged_files:
+            staged_by_path = dict(zip(selected_paths, staged_files, strict=True))
+
+            def partitioned_rows(
+                partitions: tuple[TracePartition, ...],
+            ) -> Iterator[tuple[str, dict[str, Any]]]:
+                for partition in partitions:
+                    partition_paths = tuple(
+                        staged_by_path[identity.path]
+                        for identity in receipt_files_by_partition[partition.name]
+                    )
+                    for row in iter_snapshot_rows(
+                        partition_paths,
+                        columns=projected_columns,
+                    ):
+                        observed_task_family = row.get("hf_dataset_name")
+                        if (
+                            not isinstance(observed_task_family, str)
+                            or observed_task_family.strip() != partition.row_dataset_name
+                        ):
+                            raise ResolutionRecoveryError(
+                                "trace hf_dataset_name does not match the bound partition "
+                                "task family"
+                            )
+                        yield partition.name, row
+
+            with build_resolution_recovery(
+                partitioned_rows(labeled_partitions),
+                partitioned_rows(target_partitions),
+                trace_source_revision=trace_revision,
+                task_source_revision=canonical_task_revision,
+                languages=canonical_languages,
+            ) as recovery:
+                if recovery.conflict_count:
+                    raise typer.BadParameter(
+                        "resolution label conflicts prevent artifact publication: "
+                        f"count={recovery.conflict_count}"
+                    )
+                labeled_row_counts = recovery.labeled_row_counts_by_partition
+                target_row_counts = recovery.target_row_counts_by_partition
+                accounted_target_rows = (
+                    recovery.target_ineligible_count
+                    + recovery.target_already_known_count
+                    + recovery.candidate_count
+                    + recovery.queued_target_count
+                )
+                if accounted_target_rows != recovery.target_row_count:
+                    raise typer.BadParameter(
+                        "resolution target accounting is incomplete before publication: "
+                        f"accounted={accounted_target_rows} "
+                        f"target={recovery.target_row_count}"
+                    )
+                if (
+                    sum(labeled_row_counts.values()) != recovery.labeled_row_count
+                    or sum(target_row_counts.values()) != recovery.target_row_count
+                ):
+                    raise typer.BadParameter(
+                        "resolution per-partition accounting is incomplete before publication"
+                    )
+                if (
+                    recovery.candidate_resolved_count + recovery.candidate_unresolved_count
+                    != recovery.candidate_count
+                    or recovery.candidate_unique_count > recovery.candidate_count
+                    or (recovery.candidate_unique_count == 0) != (recovery.candidate_count == 0)
+                    or recovery.evaluation_request_count > recovery.queued_target_count
+                    or (recovery.evaluation_request_count == 0)
+                    != (recovery.queued_target_count == 0)
+                ):
+                    raise typer.BadParameter(
+                        "resolution output accounting is inconsistent before publication"
+                    )
+
+                def write_candidates(stream: BinaryIO) -> None:
+                    for candidate in recovery.iter_candidates():
+                        stream.write(canonical_json_bytes(candidate.model_dump(mode="json")))
+
+                candidate_result = write_immutable_stream(
+                    candidates_output,
+                    write_candidates,
+                    before_publish=verify_inputs,
+                )
+                candidate_identity = _published_artifact_identity(
+                    candidate_result.path,
+                    candidate_result.digest,
+                )
+
+                def write_queue(stream: BinaryIO) -> None:
+                    for request in recovery.iter_evaluation_requests():
+                        stream.write(canonical_json_bytes(request.model_dump(mode="json")))
+
+                def verify_queue_boundary() -> None:
+                    verify_inputs()
+                    _require_unchanged_file(candidate_result.path, candidate_identity)
+
+                queue_result = write_immutable_stream(
+                    queue_output,
+                    write_queue,
+                    before_publish=verify_queue_boundary,
+                )
+                queue_identity = _published_artifact_identity(
+                    queue_result.path,
+                    queue_result.digest,
+                )
+
+                def partition_input(
+                    partition: TracePartition,
+                    row_count: int,
+                ) -> ResolutionPartitionInput:
+                    return ResolutionPartitionInput(
+                        partition_name=partition.name,
+                        row_count=row_count,
+                        files=tuple(
+                            ManifestFileIdentity(
+                                path=identity.path,
+                                sha256=identity.sha256,
+                                bytes=identity.bytes,
+                            )
+                            for identity in receipt_files_by_partition[partition.name]
+                        ),
+                    )
+
+                manifest = ResolutionRecoveryManifestV1(
+                    schema_version="nodelm.resolution-recovery/v1",
+                    derivation_status="PASS",
+                    admission_status="BLOCKED",
+                    admission_blocker="harness_canary_pending",
+                    source_name=source.name,
+                    source_repository_id=source.repository_id,
+                    source_revision=trace_revision,
+                    task_source_name=task_source_name,
+                    task_source_revision=canonical_task_revision,
+                    partition_contract_sha256=contract_identity[0],
+                    partition_contract_bytes=contract_identity[1],
+                    transfer_receipt_sha256=receipt_identity[0],
+                    transfer_receipt_bytes=receipt_identity[1],
+                    labeled_partitions=tuple(
+                        partition_input(
+                            partition,
+                            labeled_row_counts.get(partition.name, 0),
+                        )
+                        for partition in labeled_partitions
+                    ),
+                    target_partitions=tuple(
+                        partition_input(
+                            partition,
+                            target_row_counts.get(partition.name, 0),
+                        )
+                        for partition in target_partitions
+                    ),
+                    language_filter=canonical_languages,
+                    candidate_artifact=os.path.relpath(
+                        candidate_result.path,
+                        start=manifest_parent,
+                    ),
+                    candidate_sha256=candidate_result.digest,
+                    candidate_bytes=candidate_identity[1],
+                    queue_artifact=os.path.relpath(
+                        queue_result.path,
+                        start=manifest_parent,
+                    ),
+                    queue_sha256=queue_result.digest,
+                    queue_bytes=queue_identity[1],
+                    target_row_count=recovery.target_row_count,
+                    ineligible_row_count=recovery.target_ineligible_count,
+                    already_known_row_count=recovery.target_already_known_count,
+                    candidate_row_count=recovery.candidate_row_count,
+                    candidate_unique_count=recovery.candidate_unique_count,
+                    candidate_resolved_count=recovery.candidate_resolved_count,
+                    candidate_unresolved_count=recovery.candidate_unresolved_count,
+                    queued_fanout_row_count=recovery.queued_target_count,
+                    queue_unique_count=recovery.evaluation_request_count,
+                    conflict_count=recovery.conflict_count,
+                )
+
+                def verify_completion_boundary() -> None:
+                    verify_queue_boundary()
+                    _require_unchanged_file(queue_result.path, queue_identity)
+
+                manifest_result = write_immutable_json(
+                    manifest_output,
+                    manifest.model_dump(mode="json"),
+                    before_publish=verify_completion_boundary,
+                )
+    except (ResolutionRecoveryError, VerifiedStagingError, ValidationError, ValueError) as error:
+        raise typer.BadParameter(f"resolution recovery failed: {error}") from error
+
+    typer.echo(
+        f"wrote candidates={candidate_result.path} rows={manifest.candidate_row_count}; "
+        f"queue={queue_result.path} unique={manifest.queue_unique_count}; "
+        f"manifest={manifest_result.path} admission={manifest.admission_status}"
+    )
 
 
 @datasets_app.command("project-task-provenance")

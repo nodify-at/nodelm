@@ -24,6 +24,11 @@ RejectionCode: TypeAlias = Annotated[
     Field(pattern=r"^[a-z0-9][a-z0-9._-]*$"),
 ]
 TerminalStatus: TypeAlias = Literal["PASS", "FAIL"]
+PartitionName: TypeAlias = Annotated[
+    StrictStr,
+    Field(pattern=r"^[a-z0-9._-]+/[a-z0-9._-]+/[a-z0-9._-]+$"),
+]
+ResolutionLanguage: TypeAlias = Literal["TypeScript", "JavaScript"]
 
 TASK_PROVENANCE_SAFE_FIELDS = (
     "instance_id",
@@ -59,6 +64,30 @@ class ManifestFileIdentity(_DerivedManifest):
         ):
             raise ValueError("manifest file path must be a normalized relative POSIX path")
         return value
+
+
+class ResolutionPartitionInput(_DerivedManifest):
+    partition_name: PartitionName
+    row_count: RowCount
+    files: tuple[ManifestFileIdentity, ...] = Field(min_length=1)
+
+    @field_validator("files")
+    @classmethod
+    def require_sorted_partition_files(
+        cls,
+        files: tuple[ManifestFileIdentity, ...],
+    ) -> tuple[ManifestFileIdentity, ...]:
+        paths = tuple(identity.path for identity in files)
+        if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+            raise ValueError("resolution partition files must have unique, sorted paths")
+        return files
+
+    @model_validator(mode="after")
+    def require_files_inside_partition(self) -> ResolutionPartitionInput:
+        partition_prefix = f"data/{self.partition_name}/"
+        if any(not identity.path.startswith(partition_prefix) for identity in self.files):
+            raise ValueError("resolution partition files must stay inside their partition")
+        return self
 
 
 class _ArtifactManifest(_DerivedManifest):
@@ -198,6 +227,122 @@ class TaskProvenanceProjectionManifestV1(_FileBoundManifest):
             raise ValueError("projection_scope must reflect whether file_patterns are present")
         if sum(self.rejection_counts_by_code.values()) != self.rejected_count:
             raise ValueError("rejection count sum must equal rejected_count")
+        return self
+
+
+class ResolutionRecoveryManifestV1(_ArtifactManifest):
+    schema_version: Literal["nodelm.resolution-recovery/v1"]
+    derivation_status: Literal["PASS"]
+    admission_status: Literal["BLOCKED"]
+    admission_blocker: Literal["harness_canary_pending"]
+    source_name: NonEmptyStr
+    source_repository_id: Annotated[
+        StrictStr,
+        Field(pattern=r"^[^/\s]+/[^/\s]+$"),
+    ]
+    source_revision: CommitSha
+    task_source_name: Annotated[
+        StrictStr,
+        Field(pattern=r"^[a-z0-9][a-z0-9._-]*$"),
+    ]
+    task_source_revision: CommitSha
+    partition_contract_sha256: Sha256
+    partition_contract_bytes: ByteCount
+    transfer_receipt_sha256: Sha256
+    transfer_receipt_bytes: ByteCount
+    labeled_partitions: tuple[ResolutionPartitionInput, ...] = Field(min_length=1)
+    target_partitions: tuple[ResolutionPartitionInput, ...] = Field(min_length=1)
+    language_filter: tuple[ResolutionLanguage, ...] = Field(min_length=1)
+    candidate_artifact: NonEmptyStr
+    candidate_sha256: Sha256
+    candidate_bytes: ByteCount
+    queue_artifact: NonEmptyStr
+    queue_sha256: Sha256
+    queue_bytes: ByteCount
+    target_row_count: RowCount
+    ineligible_row_count: RowCount
+    already_known_row_count: RowCount
+    candidate_row_count: RowCount
+    candidate_unique_count: RowCount
+    candidate_resolved_count: RowCount
+    candidate_unresolved_count: RowCount
+    queued_fanout_row_count: RowCount
+    queue_unique_count: RowCount
+    conflict_count: RowCount
+
+    @field_validator("labeled_partitions", "target_partitions")
+    @classmethod
+    def require_sorted_unique_partitions(
+        cls,
+        partitions: tuple[ResolutionPartitionInput, ...],
+    ) -> tuple[ResolutionPartitionInput, ...]:
+        names = tuple(partition.partition_name for partition in partitions)
+        if names != tuple(sorted(names)) or len(names) != len(set(names)):
+            raise ValueError("resolution partitions must have unique, sorted names")
+        return partitions
+
+    @field_validator("language_filter")
+    @classmethod
+    def require_sorted_unique_languages(cls, languages: tuple[str, ...]) -> tuple[str, ...]:
+        if any(language != language.strip() for language in languages):
+            raise ValueError("language_filter entries must not contain surrounding whitespace")
+        if languages != tuple(sorted(languages)) or len(languages) != len(set(languages)):
+            raise ValueError("language_filter entries must be unique and sorted")
+        return languages
+
+    @model_validator(mode="after")
+    def verify_recovery_contract(self) -> ResolutionRecoveryManifestV1:
+        labeled_names = {partition.partition_name for partition in self.labeled_partitions}
+        target_names = {partition.partition_name for partition in self.target_partitions}
+        if labeled_names & target_names:
+            raise ValueError("labeled and target resolution partitions must be disjoint")
+
+        all_files = [
+            identity.path
+            for partition in (*self.labeled_partitions, *self.target_partitions)
+            for identity in partition.files
+        ]
+        if len(all_files) != len(set(all_files)):
+            raise ValueError("resolution partition file identities must be globally unique")
+
+        target_partition_rows = sum(partition.row_count for partition in self.target_partitions)
+        if target_partition_rows != self.target_row_count:
+            raise ValueError("target partition rows must equal target_row_count")
+
+        accounted_rows = (
+            self.ineligible_row_count
+            + self.already_known_row_count
+            + self.candidate_row_count
+            + self.queued_fanout_row_count
+        )
+        if accounted_rows != self.target_row_count:
+            raise ValueError("target recovery accounting must equal target_row_count exactly")
+
+        if (
+            self.candidate_resolved_count + self.candidate_unresolved_count
+            != self.candidate_row_count
+        ):
+            raise ValueError("candidate outcome counts must equal candidate_row_count")
+        if (self.candidate_unique_count == 0) != (self.candidate_row_count == 0):
+            raise ValueError(
+                "candidate unique count must be zero exactly when candidate rows are zero"
+            )
+        if (self.queue_unique_count == 0) != (self.queued_fanout_row_count == 0):
+            raise ValueError(
+                "queue unique count must be zero exactly when queued fanout rows are zero"
+            )
+        if self.candidate_unique_count > self.candidate_row_count:
+            raise ValueError("candidate_unique_count cannot exceed candidate_row_count")
+        if self.queue_unique_count > self.queued_fanout_row_count:
+            raise ValueError("queue_unique_count cannot exceed queued_fanout_row_count")
+        if (self.candidate_bytes == 0) != (self.candidate_row_count == 0):
+            raise ValueError("candidate bytes must be zero exactly when candidate rows are zero")
+        if (self.queue_bytes == 0) != (self.queue_unique_count == 0):
+            raise ValueError("queue bytes must be zero exactly when queue rows are zero")
+        if self.conflict_count:
+            raise ValueError("conflict_count must be zero before a PASS manifest is published")
+        if self.candidate_artifact == self.queue_artifact:
+            raise ValueError("candidate and queue artifacts must be distinct")
         return self
 
 

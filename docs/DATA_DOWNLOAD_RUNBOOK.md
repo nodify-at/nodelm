@@ -2,13 +2,15 @@
 
 Real transfer and receipt-bound core audit status: `PASS` (completed 2026-08-24)
 
-One real receipt-replayed normalization canary is now `PASS`; full-partition normalization,
-gold-exposure auditing, decontamination, and split freezing remain `NOT RUN`. The completed
-snapshots and raw evidence live outside Git under `/workspace/nodelm` on persistent storage;
-their compact digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is
-currently required. Use this runbook only for recovery or an explicitly authorized re-execution
-on a new, empty
-external-volume destination. Never run the transfer commands from the local project workspace.
+One real receipt-replayed normalization canary is `PASS`, and all seven eligible full-partition
+Open-SWE leaves now have terminal evidence: four labeled MiniMax/Qwen3.5 leaves are `PASS`, while
+the three Qwen3.6 leaves are truthful `FAIL` because every source resolution is unknown.
+Gold-exposure auditing, resolution-recovery derivation, decontamination, and split freezing remain
+`NOT RUN`. The completed snapshots and raw evidence live outside Git under `/workspace/nodelm` on
+persistent storage; their compact digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No
+re-download is currently required. Use this runbook only for recovery or an explicitly authorized
+re-execution on a new, empty external-volume destination. Never run the transfer commands from the
+local project workspace.
 
 ## Completed evidence and safeguards
 
@@ -27,6 +29,71 @@ external-volume destination. Never run the transfer commands from the local proj
 - No full snapshot, model weight, checkpoint, or generated training artifact is committed to
   the project workspace. The three real snapshots and their receipt/audit/rejection/lineage
   bundles are retained on the external persistent volume.
+
+## Resolution-recovery derivation (prepared, not run)
+
+The prepared recovery runner is a CPU/data-integrity operation. It derives exact task-and-patch
+label-transfer candidates plus a deduplicated evaluator queue whose manifest remains admission
+`BLOCKED`. It does not download data, start a repository evaluator, load a model, train, use a
+GPU, or admit recovered labels into normalization.
+
+The production layout is fixed to the persistent Runpod mount:
+
+- clean exact-commit checkout: `/workspace/nodelm/repo`;
+- Open-SWE snapshot: `/workspace/nodelm/snapshots/open-swe-traces`;
+- sealed receipt: `/workspace/nodelm/receipts/open-swe-traces.transfer.json`;
+- shared persistent root: `/workspace/nodelm`;
+- exact output directory:
+  `/workspace/nodelm/derived/resolution-recovery-<full-40-character-HEAD>`.
+
+Launch only from a clean committed checkout. The runner binds the exact commit, tree, runner blob,
+registry, partition contract, and transfer receipt, then stays fully offline:
+
+```bash
+cd /workspace/nodelm/repo
+git status --short
+mkdir -p /workspace/nodelm/logs
+nohup bash scripts/run_resolution_recovery.sh \
+  >/workspace/nodelm/logs/resolution-recovery.launch.log 2>&1 &
+```
+
+Resolve the content-addressed run directory from that exact commit and inspect its durable state
+without keeping an SSH session open:
+
+```bash
+NODELM_RUN_COMMIT="$(git -C /workspace/nodelm/repo rev-parse HEAD)"
+NODELM_RECOVERY_DIR="/workspace/nodelm/derived/resolution-recovery-${NODELM_RUN_COMMIT}"
+cat "${NODELM_RECOVERY_DIR}/run.state"
+tail -n 50 "${NODELM_RECOVERY_DIR}/events.log"
+tail -n 100 "${NODELM_RECOVERY_DIR}/runner.log"
+```
+
+`run.state` records the runner PID, commit, phase, detail, and stop-file path. Before
+`phase=build`, request a clean stop by creating the recorded sentinel:
+
+```bash
+touch "${NODELM_RECOVERY_DIR}/STOP"
+```
+
+Once `phase=build` is active, the sentinel is no longer polled. Read the current PID from
+`run.state` and send TERM to that runner; it forwards TERM to its active child and records
+`STOPPED`:
+
+```bash
+NODELM_RECOVERY_PID="$(sed -n 's/^pid=//p' "${NODELM_RECOVERY_DIR}/run.state")"
+kill -TERM "${NODELM_RECOVERY_PID}"
+```
+
+For the same exact commit, a restart uses the same content-addressed directory. A complete
+three-artifact terminal set is validated and reported `COMPLETE` without rebuilding. With no
+terminal artifacts, move the `STOP` sentinel aside and rerun the same launch command. A partial set
+that has the matching immutable `run.binding` is rebuilt deterministically: existing artifacts are
+reused only when byte-identical and missing artifacts are published without overwriting prior
+evidence. A differing existing artifact, or any terminal artifact without a binding, fails closed.
+Preserve partial outputs and temporary staging remnants for inspection; do not remove them without
+explicit approval. Any code change creates a different commit-bound run directory. A successful
+recovery derivation still ends with `admission=BLOCKED` and `harness_canary_pending`; real evaluator
+execution is a separate later operation on a container-capable CPU host.
 
 ## Large-storage host preflight
 

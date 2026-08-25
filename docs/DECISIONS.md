@@ -193,3 +193,23 @@ The reviewed pilot may retain `UNVERIFIED` while the checked-in pilot policy awa
 thresholds because this command verifies only one optimizer/checkpoint/resume lifecycle; scaled
 training remains blocked until that policy is deliberately frozen and promoted. Empty
 authorization maps mean no real split or pilot is approved by default.
+
+## D-019 — unknown resolution recovery remains evidence-bound and non-admitting
+
+Resolution transfer is keyed by the pinned trace-source revision, pinned task-source revision,
+instance ID, and exact UTF-8 model-patch digest. A candidate is emitted only when the target is
+still unknown and every known label for that target task-and-patch key agrees; an already-known
+target is never overwritten. Label conflicts fail closed when their key occurs in the eligible
+unknown target population. Conflicts unrelated to that target population cannot block the run.
+
+Targets without unanimous exact-match evidence are grouped globally into one deterministic
+evaluator request per task-and-patch key with sorted target references. The disk-backed
+projection retains only the instance ID, exact model patch, partition/rollout references, and
+projected-row digests needed for evidence binding. Trajectories and gold, reference, or test
+content cannot cross into either the candidate sidecar or evaluator queue.
+
+Recovery publication is immutable and records derivation separately from admission. A
+successfully derived `nodelm.resolution-recovery/v1` manifest remains admission `BLOCKED`; it is
+not permission to normalize recovered rows or train. Real recovery derivation remains `NOT RUN`,
+and no recovered label may enter downstream data until a sandboxed harness canary validates the
+transfer and evaluation path.
