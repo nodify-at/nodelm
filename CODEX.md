@@ -32,10 +32,12 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
 - All three pinned dataset snapshots and their receipt-bound core audits and lineage are complete
   on external persistent storage; no re-download is currently required. Raw evidence is indexed
   by `artifacts/reports/FULL_DATASET_AUDIT.md`. One receipt-replayed real normalization canary is
-  `PASS`; full-partition normalization, gold auditing, and decontamination remain `NOT RUN`.
-  Require explicit current-session authorization for recovery or re-execution into new, empty
-  destinations and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the exact
-  evidence in `docs/EXPERIMENTS.md`.
+  `PASS`. All seven eligible full-partition leaves have terminal evidence: four MiniMax/Qwen3.5
+  leaves are `PASS`, while three Qwen3.6 leaves are truthful `FAIL` because their source resolution
+  is unknown. Resolution recovery, gold auditing, and decontamination remain `NOT RUN`. Require
+  explicit current-session authorization for recovery or re-execution into new, empty destinations
+  and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the exact evidence in
+  `docs/EXPERIMENTS.md`.
 - Treat `complete-snapshot` as an input-scope claim: it covers all supported JSONL/Parquet data
   files discovered at the supplied local path. It does not mean the plan's Phase 0 is complete,
   and a synthetic fixture `PASS` is never a real-source audit or lineage result.

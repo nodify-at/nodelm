@@ -155,6 +155,47 @@ uv run --frozen --directory /workspace/nodelm/repo nodelm datasets normalize \
   retained outside Git under
   `/workspace/nodelm/derived/normalization-canary-20260825-7366ec0`.
 
+## 2026-08-25 — real full-partition Open-SWE normalization
+
+- Code and command: commit `18c0ada5f396191d247cfe57640b6f2bb9fade86` ran the offline,
+  commit-bound `scripts/run_full_normalization.sh` runner against all seven eligible SWE-rebench
+  V2 leaves on persistent `/workspace` storage.
+- Immutable inputs: Open-SWE-Traces
+  `ed95cef24df8d8bd79b4ceb0192cb420fde06521`, SWE-rebench V2
+  `475dd5e8703bb5fb22dd3c60b5d038b019eba1e0`, registry SHA-256
+  `f92315a70a0c75ec909d83f4cb639b3a320f62526069f11ca87f0fe1d891637f`, partition-contract
+  SHA-256 `aec2ae095a926dda09a5fe3eefede7a59fbd494b24fffd503fff4cb366b389b5`, and
+  lock SHA-256 `88f316fbfffc905a14d9528706171e1e30428e72fde432c8775edebc67859160`.
+- Runtime: the pre-provisioned offline `/opt/nodelm-venv` data environment documented above,
+  using Python 3.11.13 and PyArrow 25.0.1. No stochastic seed applied because the runner performs
+  deterministic materialization, replay, validation, and canonical publication only.
+- Result: all seven leaves reached validated terminal evidence. Across the four labeled
+  MiniMax/Qwen3.5 leaves, 207,489 inputs produced 160,731 accepted rows and 46,758 truthful
+  `unknown_resolution` rejections. Across the three Qwen3.6 leaves, 179,533 inputs produced zero
+  accepted rows and 179,533 truthful `unknown_resolution` rejections. The labeled leaves are
+  `PASS`; the Qwen3.6 leaves are truthful `FAIL`, not runner failures.
+- Normalization-manifest SHA-256 values:
+  - `openhands/minimax_m25/swe-rebench-v2` (`PASS`):
+    `68f21f192c1af397837610ef6e4033fb04e9e2a38043f461a42d70ab6b47082e`;
+  - `openhands/qwen35_122b/swe-rebench-v2` (`PASS`):
+    `339f4a2923eaa92b07155fb35604ce61c2358f554de09146226124ab01ca0996`;
+  - `sweagent/minimax_m25/swe-rebench-v2` (`PASS`):
+    `2ed86030086ededc8c69c8aa8801f49c4034a7cbee2878f7311cf60512cc1c2e`;
+  - `sweagent/qwen35_122b/swe-rebench-v2` (`PASS`):
+    `725ab61444546026c10d4e4d6745c324f0430063151650c905cfbc6b7d80b372`;
+  - `minisweagent/qwen36_27b/swe-rebench-v2` (truthful `FAIL`):
+    `17a262bf45d7406d47d0904ad1a26948171650580db5e77a8f1eb57172859c54`;
+  - `openhands/qwen36_27b/swe-rebench-v2` (truthful `FAIL`):
+    `1bd8a306a6ecf501db01f29aa7eb4bbffe893d2b1648576756afe958d16f64f7`;
+  - `sweagent/qwen36_27b/swe-rebench-v2` (truthful `FAIL`):
+    `054be3587000986ef1ff92ccd95726a26f820b71f8a4a3534962b0cf51f6dabd`.
+- Wall clock: `2026-08-25T14:29:08Z` through `2026-08-25T18:12:53Z`, or 3 hours
+  43 minutes 45 seconds. The complete evidence remains outside Git under
+  `/workspace/nodelm/derived/full-normalization-18c0ada5f396191d247cfe57640b6f2bb9fade86`.
+- GPU use, model loading, model execution, evaluation, and training: `NOT RUN`. Resolution-recovery
+  derivation also remains `NOT RUN`; these terminal manifests do not authorize recovered labels or
+  training admission.
+
 New experiment entries must include immutable input revisions, config/lock digests, commands,
 versions, seed, artifact hashes, wall-clock time, and `PASS`, `FAIL`, `NOT RUN`, `BLOCKED`, or
 `UNVERIFIED` per check.

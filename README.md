@@ -164,7 +164,9 @@ student candidates and primary teacher are pinned in strict metadata contracts. 
 offline synthetic contract verification, and the real receipt-bound transfer/core audit/lineage
 for all three sources are `PASS`. The complete V2 safe projection and one 1,000-row
 receipt-replayed normalization canary are also `PASS`; exact evidence is in
-[`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Full-partition normalization, gold-exposure
-auditing, decontamination, split and pilot construction, model execution, the 50–100-task
-candidate bake-off, student selection, and training remain `NOT RUN`. See
+[`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). All seven eligible full-partition leaves now have
+terminal evidence: four MiniMax/Qwen3.5 leaves are `PASS`, while three Qwen3.6 leaves are truthful
+`FAIL` because their source resolution is unknown. Resolution recovery, gold-exposure auditing,
+decontamination, split and pilot construction, model execution, the 50–100-task candidate
+bake-off, student selection, and training remain `NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

@@ -91,8 +91,13 @@ invocation failed before transfer because it used the invalid `--receipt` option
 `--receipt-output`; the corrected invocation then completed normally. SWE-rebench V2 had
 already completed as the preceding real-source smoke run.
 
-The following remain `NOT RUN`: full normalization, tokenizer-based trajectory lengths, unique
-issue/PR counts, harness and generating-model distributions, exact/near patch duplication,
-public-evaluation overlap, contamination-safe split freezing, pilot construction, candidate
-model execution, the student bake-off, training, and evaluation. The core audit `PASS` is one
-Phase 0 prerequisite; it does not complete Phase 0 or authorize paid training.
+At this audit's 2026-08-24 completion boundary, full normalization and all later gates were
+`NOT RUN`. On 2026-08-25, all seven eligible full-partition leaves reached terminal normalization
+evidence: four MiniMax/Qwen3.5 leaves are `PASS`, while three all-unknown Qwen3.6 leaves are
+truthful `FAIL`; exact hashes are recorded in `docs/EXPERIMENTS.md`.
+
+Tokenizer-based trajectory lengths, unique issue/PR counts, harness and generating-model
+distributions, exact/near patch duplication, public-evaluation overlap, resolution recovery,
+contamination-safe split freezing, pilot construction, candidate model execution, the student
+bake-off, training, and evaluation remain `NOT RUN`. The core audit `PASS` is one Phase 0
+prerequisite; it does not complete Phase 0 or authorize paid training.
