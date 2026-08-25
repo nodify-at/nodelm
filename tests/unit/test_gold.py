@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from nodelm.provenance.gold import (
     GoldExposureAudit,
     GoldExposureAuthorizationError,
+    SanitizedGoldExposureFinding,
     require_authorized_gold_audit,
 )
 
@@ -45,9 +46,53 @@ def test_gold_exposure_pass_requires_complete_zero_finding_coverage() -> None:
         GoldExposureAudit.model_validate(payload)
 
 
+def test_gold_exposure_pass_requires_a_nonempty_population() -> None:
+    payload = _audit_payload()
+    payload["expected_sample_count"] = 0
+    payload["audited_sample_count"] = 0
+    oracle_isolation = payload["oracle_isolation"]
+    assert isinstance(oracle_isolation, dict)
+    oracle_isolation["covered_sample_count"] = 0
+
+    with pytest.raises(ValidationError, match="non-empty population"):
+        GoldExposureAudit.model_validate(payload)
+
+
 def test_unreviewed_gold_audit_is_not_authorized() -> None:
     with pytest.raises(GoldExposureAuthorizationError, match="no reviewed"):
         require_authorized_gold_audit(
             normalized_sha256="e" * 64,
             audit_sha256="f" * 64,
         )
+
+
+def test_sanitized_gold_finding_has_a_fixed_safe_reason_and_forbids_extras() -> None:
+    payload = {
+        "row_index": 0,
+        "sample_id": "a" * 64,
+        "reason_code": "forbidden_gold_reference_patch",
+        "reason": "trajectory contains forbidden gold/reference patch metadata",
+    }
+
+    finding = SanitizedGoldExposureFinding.model_validate(payload)
+
+    assert finding.model_dump(mode="json") == payload
+    assert (
+        SanitizedGoldExposureFinding.from_reason_code(
+            row_index=0,
+            sample_id="a" * 64,
+            reason_code="forbidden_gold_reference_patch",
+        ).model_dump(mode="json")
+        == payload
+    )
+
+    with pytest.raises(ValidationError, match="reason must match"):
+        SanitizedGoldExposureFinding.model_validate(
+            {
+                **payload,
+                "reason": "normalized row does not satisfy the sample schema",
+            }
+        )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        SanitizedGoldExposureFinding.model_validate({**payload, "trajectory": "secret"})

@@ -62,9 +62,11 @@ def test_normalize_sample_rejects_missing_base_commit() -> None:
     [
         [{"role": "tool", "payload": {"gold_patch": "SECRET_GOLD"}}],
         [{"role": "tool", "reference": {"patch": "SECRET_REFERENCE"}}],
+        [{"golden_patch": "SECRET_GOLDEN_DIRECT"}],
+        [{"role": "tool", "payload": {"golden_patch": "SECRET_GOLDEN_NESTED"}}],
     ],
 )
-def test_normalize_sample_rejects_nested_gold_or_reference_patch(
+def test_normalize_sample_rejects_gold_or_reference_patch(
     trajectory: list[dict[str, object]],
 ) -> None:
     with pytest.raises(NormalizationError, match="forbidden gold/reference patch"):

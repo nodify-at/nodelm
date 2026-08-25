@@ -85,6 +85,7 @@ from nodelm.provenance.gold import (
     GoldExposureAudit,
     GoldExposureAuthorizationError,
     OracleIsolationAttestation,
+    SanitizedGoldExposureFinding,
     require_authorized_gold_audit,
 )
 from nodelm.provenance.manifests import (
@@ -143,6 +144,15 @@ def configure_cli() -> None:
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
 
 
 def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
@@ -1420,6 +1430,260 @@ def datasets_normalize(
         f"sha256={normalized_result.digest}; manifest={manifest_result.path}"
     )
     if accepted_count == 0:
+        raise typer.Exit(code=1)
+
+
+@datasets_app.command("audit-gold-exposure")
+def datasets_audit_gold_exposure(
+    input_path: Path = typer.Option(..., "--input", "--normalized", exists=True, dir_okay=False),
+    normalization_manifest: Path = typer.Option(
+        ..., "--normalization-manifest", exists=True, dir_okay=False
+    ),
+    output: Path = typer.Option(..., "--output", dir_okay=False),
+    findings_output: Path | None = typer.Option(None, "--findings-output", dir_okay=False),
+    oracle_isolation_attestation: Path | None = typer.Option(
+        None,
+        "--oracle-isolation-attestation",
+        exists=True,
+        dir_okay=False,
+    ),
+) -> None:
+    """Audit a normalized population without serializing trajectory or gold content."""
+
+    findings_path = findings_output or output.with_name(f"{output.stem}.findings.jsonl")
+    staged_source_paths = [normalization_manifest, input_path]
+    if oracle_isolation_attestation is not None:
+        staged_source_paths.append(oracle_isolation_attestation)
+
+    def same_existing_file(left: Path, right: Path) -> bool:
+        return left.exists() and right.exists() and os.path.samefile(left, right)
+
+    if output.resolve() == findings_path.resolve() or same_existing_file(output, findings_path):
+        raise typer.BadParameter("--output and --findings-output must be distinct paths")
+    if any(
+        artifact_path.resolve() == source_path.resolve()
+        or same_existing_file(artifact_path, source_path)
+        for artifact_path in (output, findings_path)
+        for source_path in staged_source_paths
+    ):
+        raise typer.BadParameter("audit output paths must not collide with staged inputs")
+    if output.exists():
+        raise typer.BadParameter("audit output already exists")
+
+    normalization_payload, normalization_identity = _read_json_mapping_with_identity(
+        normalization_manifest
+    )
+    try:
+        normalization = NormalizationManifestV2.model_validate(normalization_payload)
+    except ValidationError as error:
+        raise typer.BadParameter("invalid normalization manifest evidence") from error
+
+    input_identity = file_identity(input_path)
+    if input_identity != (
+        normalization.normalized_sha256,
+        normalization.normalized_bytes,
+    ):
+        raise typer.BadParameter("normalization manifest does not bind --input")
+    normalized_path = Path(normalization.normalized_artifact)
+    if not normalized_path.is_absolute():
+        normalized_path = normalization_manifest.resolve().parent / normalized_path
+    if normalized_path.resolve() != input_path.resolve():
+        raise typer.BadParameter("normalization manifest artifact path does not match --input")
+
+    attestation: OracleIsolationAttestation | None = None
+    attestation_identity: tuple[str, int] | None = None
+    if oracle_isolation_attestation is not None:
+        attestation_payload, attestation_identity = _read_json_mapping_with_identity(
+            oracle_isolation_attestation
+        )
+        try:
+            attestation = OracleIsolationAttestation.model_validate(attestation_payload)
+        except ValidationError as error:
+            raise typer.BadParameter("invalid oracle-isolation attestation") from error
+        if (
+            attestation.source_name != normalization.source_name
+            or attestation.source_revision != normalization.source_revision
+            or attestation.partition_name != normalization.partition_name
+            or attestation.normalized_sha256 != input_identity[0]
+            or attestation.normalized_bytes != input_identity[1]
+            or attestation.covered_sample_count != normalization.accepted_count
+        ):
+            raise typer.BadParameter("oracle-isolation attestation coverage is inconsistent")
+
+    staged_inputs: list[tuple[Path, tuple[str, int]]] = [
+        (normalization_manifest, normalization_identity),
+        (input_path, input_identity),
+    ]
+    if oracle_isolation_attestation is not None and attestation_identity is not None:
+        staged_inputs.append((oracle_isolation_attestation, attestation_identity))
+
+    def verify_inputs() -> None:
+        _require_unchanged_file(normalization_manifest, normalization_identity)
+        _require_unchanged_file(input_path, input_identity)
+        if oracle_isolation_attestation is not None and attestation_identity is not None:
+            _require_unchanged_file(
+                oracle_isolation_attestation,
+                attestation_identity,
+            )
+
+    audited_sample_count = 0
+    finding_count = 0
+    findings_bytes = 0
+    try:
+        with verified_staged_files(tuple(staged_inputs)) as staged_files:
+            staged_normalized = staged_files[1]
+
+            def write_findings(stream: BinaryIO) -> None:
+                nonlocal audited_sample_count, finding_count, findings_bytes
+
+                with staged_normalized.open("rb") as normalized_stream:
+                    for raw_row in normalized_stream:
+                        if not raw_row.strip():
+                            continue
+                        row_index = audited_sample_count
+                        audited_sample_count += 1
+                        try:
+                            value = json.loads(
+                                raw_row,
+                                object_pairs_hook=_unique_json_object,
+                            )
+                        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                            value = None
+                        row = value if isinstance(value, dict) else None
+                        if row is None:
+                            finding = SanitizedGoldExposureFinding.from_reason_code(
+                                row_index=row_index,
+                                sample_id=None,
+                                reason_code="invalid_normalized_sample",
+                            )
+                        else:
+                            try:
+                                sample = NormalizedSample.model_validate(row)
+                            except ValidationError:
+                                finding = SanitizedGoldExposureFinding.from_reason_code(
+                                    row_index=row_index,
+                                    sample_id=None,
+                                    reason_code="invalid_normalized_sample",
+                                )
+                            else:
+                                try:
+                                    validate_gold_free_trajectory(sample.trajectory)
+                                except NormalizationError:
+                                    finding = SanitizedGoldExposureFinding.from_reason_code(
+                                        row_index=row_index,
+                                        sample_id=sample.sample_id,
+                                        reason_code="forbidden_gold_reference_patch",
+                                    )
+                                else:
+                                    continue
+                        finding_bytes = canonical_json_bytes(finding.model_dump(mode="json"))
+                        stream.write(finding_bytes)
+                        findings_bytes += len(finding_bytes)
+                        finding_count += 1
+
+            findings_result = write_immutable_stream(
+                findings_path,
+                write_findings,
+                before_publish=verify_inputs,
+            )
+            findings_identity = (findings_result.digest, findings_bytes)
+    except VerifiedStagingError as error:
+        raise typer.BadParameter(f"unable to audit verified normalized input: {error}") from error
+
+    expected_sample_count = normalization.accepted_count
+    count_mismatch = audited_sample_count != expected_sample_count
+    structural_status = (
+        VerificationStatus.FAIL if finding_count or count_mismatch else VerificationStatus.PASS
+    )
+    if (
+        finding_count
+        or count_mismatch
+        or expected_sample_count == 0
+        or normalization.status != VerificationStatus.PASS.value
+    ):
+        overall_status = VerificationStatus.FAIL
+    elif normalization.uniqueness_scope != "complete-partition" or attestation is None:
+        overall_status = VerificationStatus.BLOCKED
+    else:
+        overall_status = VerificationStatus.PASS
+
+    if attestation is None or attestation_identity is None:
+        oracle_evidence: dict[str, object] = {
+            "status": VerificationStatus.BLOCKED.value,
+            "attestation_artifact": None,
+            "attestation_sha256": None,
+            "attestation_bytes": None,
+            "covered_sample_count": 0,
+        }
+    elif count_mismatch:
+        oracle_evidence = {
+            "status": VerificationStatus.FAIL.value,
+            "attestation_artifact": None,
+            "attestation_sha256": None,
+            "attestation_bytes": None,
+            "covered_sample_count": 0,
+        }
+    else:
+        assert oracle_isolation_attestation is not None
+        oracle_evidence = {
+            "status": VerificationStatus.PASS.value,
+            "attestation_artifact": os.path.relpath(
+                oracle_isolation_attestation,
+                start=output.resolve().parent,
+            ),
+            "attestation_sha256": attestation_identity[0],
+            "attestation_bytes": attestation_identity[1],
+            "covered_sample_count": attestation.covered_sample_count,
+        }
+
+    audit = GoldExposureAudit.model_validate(
+        {
+            "schema_version": "nodelm.gold-exposure-audit/v1",
+            "method_version": "nodelm.gold-exposure-audit-method/v1",
+            "status": overall_status.value,
+            "normalization_manifest_artifact": os.path.relpath(
+                normalization_manifest,
+                start=output.resolve().parent,
+            ),
+            "normalization_manifest_sha256": normalization_identity[0],
+            "normalization_manifest_bytes": normalization_identity[1],
+            "normalized_artifact": os.path.relpath(
+                input_path,
+                start=output.resolve().parent,
+            ),
+            "normalized_sha256": input_identity[0],
+            "normalized_bytes": input_identity[1],
+            "expected_sample_count": expected_sample_count,
+            "audited_sample_count": audited_sample_count,
+            "structural_scan": {
+                "status": structural_status.value,
+                "finding_count": finding_count,
+            },
+            "oracle_isolation": oracle_evidence,
+            "findings_artifact": os.path.relpath(
+                findings_result.path,
+                start=output.resolve().parent,
+            ),
+            "findings_sha256": findings_identity[0],
+            "findings_bytes": findings_identity[1],
+        }
+    )
+
+    def verify_completion_boundary() -> None:
+        verify_inputs()
+        _require_unchanged_file(findings_result.path, findings_identity)
+
+    audit_result = write_immutable_json(
+        output,
+        audit.model_dump(mode="json"),
+        before_publish=verify_completion_boundary,
+    )
+    typer.echo(
+        f"wrote {audit_result.path} status={overall_status.value} "
+        f"audited={audited_sample_count} findings={finding_count} "
+        f"sha256={audit_result.digest}"
+    )
+    if overall_status is not VerificationStatus.PASS:
         raise typer.Exit(code=1)
 
 

@@ -39,9 +39,11 @@ def test_training_text_is_deterministic_and_gold_free() -> None:
     [
         ({"role": "tool", "payload": {"gold_patch": "SECRET_GOLD"}},),
         ({"role": "tool", "reference": {"patch": "SECRET_REFERENCE"}},),
+        ({"golden_patch": "SECRET_GOLDEN_DIRECT"},),
+        ({"role": "tool", "payload": {"golden_patch": "SECRET_GOLDEN_NESTED"}},),
     ],
 )
-def test_training_text_rejects_nested_gold_or_reference_patch(
+def test_training_text_rejects_gold_or_reference_patch(
     trajectory: tuple[dict[str, object], ...],
 ) -> None:
     unsafe_sample = _sample().model_copy(update={"trajectory": trajectory})

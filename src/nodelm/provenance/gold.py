@@ -1,14 +1,66 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from nodelm.models import VerificationStatus
 
 
 class GoldExposureAuthorizationError(ValueError):
     """A gold-exposure PASS artifact is not part of the reviewed trust root."""
+
+
+GoldExposureFindingReasonCode: TypeAlias = Literal[
+    "invalid_normalized_sample",
+    "forbidden_gold_reference_patch",
+]
+GoldExposureFindingReason: TypeAlias = Literal[
+    "normalized row does not satisfy the sample schema",
+    "trajectory contains forbidden gold/reference patch metadata",
+]
+
+_SAFE_FINDING_REASON_BY_CODE: dict[
+    GoldExposureFindingReasonCode,
+    GoldExposureFindingReason,
+] = {
+    "invalid_normalized_sample": "normalized row does not satisfy the sample schema",
+    "forbidden_gold_reference_patch": (
+        "trajectory contains forbidden gold/reference patch metadata"
+    ),
+}
+
+
+class SanitizedGoldExposureFinding(BaseModel):
+    """A finding that cannot serialize model-visible trajectory or gold content."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    row_index: Annotated[StrictInt, Field(ge=0)]
+    sample_id: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+    reason_code: GoldExposureFindingReasonCode
+    reason: GoldExposureFindingReason
+
+    @classmethod
+    def from_reason_code(
+        cls,
+        *,
+        row_index: int,
+        sample_id: str | None,
+        reason_code: GoldExposureFindingReasonCode,
+    ) -> SanitizedGoldExposureFinding:
+        return cls(
+            row_index=row_index,
+            sample_id=sample_id,
+            reason_code=reason_code,
+            reason=_SAFE_FINDING_REASON_BY_CODE[reason_code],
+        )
+
+    @model_validator(mode="after")
+    def require_fixed_safe_reason(self) -> SanitizedGoldExposureFinding:
+        if self.reason != _SAFE_FINDING_REASON_BY_CODE[self.reason_code]:
+            raise ValueError("finding reason must match its fixed safe reason code")
+        return self
 
 
 class StructuralGoldScan(BaseModel):
@@ -85,11 +137,13 @@ class GoldExposureAudit(BaseModel):
             self.structural_scan.status is not VerificationStatus.PASS
             or self.structural_scan.finding_count != 0
             or self.oracle_isolation.status is not VerificationStatus.PASS
+            or self.expected_sample_count == 0
             or self.expected_sample_count != self.audited_sample_count
             or self.oracle_isolation.covered_sample_count != self.audited_sample_count
         ):
             raise ValueError(
-                "PASS gold-exposure audit requires zero findings and complete oracle coverage"
+                "PASS gold-exposure audit requires a non-empty population, zero findings, "
+                "and complete oracle coverage"
             )
         return self
 

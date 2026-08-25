@@ -453,9 +453,6 @@ def test_snapshot_materializes_normalizes_splits_and_builds_a_pilot(
 
     normalized_identity = file_identity(normalized)
     normalization_manifest_path = tmp_path / "normalized.manifest.json"
-    normalization_identity = file_identity(normalization_manifest_path)
-    findings_path = tmp_path / "gold.findings.jsonl"
-    findings_path.write_bytes(b"")
     attestation_path = tmp_path / "oracle-isolation.json"
     attestation_path.write_bytes(
         canonical_json_bytes(
@@ -472,37 +469,27 @@ def test_snapshot_materializes_normalizes_splits_and_builds_a_pilot(
             }
         )
     )
-    findings_identity = file_identity(findings_path)
-    attestation_identity = file_identity(attestation_path)
     gold_audit = tmp_path / "gold-exposure.audit.json"
-    gold_audit.write_bytes(
-        canonical_json_bytes(
-            {
-                "schema_version": "nodelm.gold-exposure-audit/v1",
-                "method_version": "nodelm.gold-exposure-audit-method/v1",
-                "status": "PASS",
-                "normalization_manifest_artifact": normalization_manifest_path.name,
-                "normalization_manifest_sha256": normalization_identity[0],
-                "normalization_manifest_bytes": normalization_identity[1],
-                "normalized_artifact": normalized.name,
-                "normalized_sha256": normalized_identity[0],
-                "normalized_bytes": normalized_identity[1],
-                "expected_sample_count": 1,
-                "audited_sample_count": 1,
-                "structural_scan": {"status": "PASS", "finding_count": 0},
-                "oracle_isolation": {
-                    "status": "PASS",
-                    "attestation_artifact": attestation_path.name,
-                    "attestation_sha256": attestation_identity[0],
-                    "attestation_bytes": attestation_identity[1],
-                    "covered_sample_count": 1,
-                },
-                "findings_artifact": findings_path.name,
-                "findings_sha256": findings_identity[0],
-                "findings_bytes": findings_identity[1],
-            }
-        )
+    gold_findings = tmp_path / "gold-exposure.findings.jsonl"
+    gold_audit_result = runner.invoke(
+        app,
+        [
+            "datasets",
+            "audit-gold-exposure",
+            "--input",
+            str(normalized),
+            "--normalization-manifest",
+            str(normalization_manifest_path),
+            "--output",
+            str(gold_audit),
+            "--findings-output",
+            str(gold_findings),
+            "--oracle-isolation-attestation",
+            str(attestation_path),
+        ],
     )
+    assert gold_audit_result.exit_code == 0, gold_audit_result.output
+    assert gold_findings.read_bytes() == b""
     monkeypatch.setitem(
         AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256,
         normalized_identity[0],

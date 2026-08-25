@@ -1189,3 +1189,562 @@ def test_dataset_registry_validate_preserves_explicit_fail(tmp_path: Path) -> No
 
     assert result.exit_code == 1
     assert '"status":"FAIL"' in result.output
+
+
+def _gold_audit_sample(
+    *,
+    trajectory: tuple[dict[str, object], ...] = (
+        {"role": "assistant", "content": "inspect and patch"},
+    ),
+) -> NormalizedSample:
+    return NormalizedSample(
+        source_dataset="fixture",
+        source_dataset_revision="a" * 40,
+        repository="acme/widget",
+        repository_license="MIT",
+        base_commit="b" * 40,
+        issue_or_pr_id="one",
+        language="TypeScript",
+        harness="fixture",
+        generating_model="fixture@revision",
+        rollout_id="rollout-one",
+        resolved=True,
+        trajectory=trajectory,
+        generated_patch="diff --git a/a.ts b/a.ts",
+        patch_metadata={"bytes": 1},
+        provenance_lineage=("raw:one",),
+    )
+
+
+def _gold_audit_command_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sample: NormalizedSample | None = None,
+    sample_count: int = 1,
+    uniqueness_scope: str = "complete-partition",
+) -> tuple[Path, Path, Path, Path, Path]:
+    normalized = tmp_path / "normalized.jsonl"
+    normalized.write_text(
+        (sample or _gold_audit_sample()).model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    manifest, _ = _write_pilot_safety_evidence(
+        tmp_path,
+        normalized,
+        monkeypatch,
+        sample_count=sample_count,
+        uniqueness_scope=uniqueness_scope,
+    )
+    return (
+        normalized,
+        manifest,
+        tmp_path / "oracle-isolation.json",
+        tmp_path / "produced-gold.audit.json",
+        tmp_path / "produced-gold.findings.jsonl",
+    )
+
+
+def _invoke_gold_audit(
+    normalized: Path,
+    manifest: Path,
+    audit: Path,
+    findings: Path,
+    *,
+    attestation: Path | None = None,
+):
+    arguments = [
+        "datasets",
+        "audit-gold-exposure",
+        "--input",
+        str(normalized),
+        "--normalization-manifest",
+        str(manifest),
+        "--output",
+        str(audit),
+        "--findings-output",
+        str(findings),
+    ]
+    if attestation is not None:
+        arguments.extend(("--oracle-isolation-attestation", str(attestation)))
+    return CliRunner().invoke(app, arguments)
+
+
+def _replace_gold_audit_input(
+    normalized: Path,
+    manifest: Path,
+    raw_rows: bytes,
+) -> None:
+    normalized.write_bytes(raw_rows)
+    normalized_identity = file_identity(normalized)
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload.update(
+        {
+            "normalized_sha256": normalized_identity[0],
+            "normalized_bytes": normalized_identity[1],
+        }
+    )
+    manifest.write_bytes(canonical_json_bytes(manifest_payload))
+
+
+def test_gold_audit_command_passes_complete_population_with_reviewed_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "PASS"
+    assert payload["expected_sample_count"] == payload["audited_sample_count"] == 1
+    assert payload["structural_scan"] == {"status": "PASS", "finding_count": 0}
+    assert payload["oracle_isolation"]["status"] == "PASS"
+    assert payload["findings_artifact"] == findings.name
+    assert findings.read_bytes() == b""
+
+
+def test_gold_audit_command_blocks_without_oracle_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["structural_scan"] == {"status": "PASS", "finding_count": 0}
+    assert payload["oracle_isolation"] == {
+        "status": "BLOCKED",
+        "attestation_artifact": None,
+        "attestation_sha256": None,
+        "attestation_bytes": None,
+        "covered_sample_count": 0,
+    }
+
+
+def test_gold_audit_command_blocks_canary_even_with_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+        uniqueness_scope="canary",
+    )
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["oracle_isolation"]["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "trajectory",
+    [
+        ({"reference": {"patch": "TOP_SECRET_REFERENCE_PATCH"}},),
+        ({"golden_patch": "TOP_SECRET_REFERENCE_PATCH"},),
+        ({"payload": {"golden_patch": "TOP_SECRET_REFERENCE_PATCH"}},),
+    ],
+)
+def test_gold_audit_command_fails_safely_on_forbidden_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trajectory: tuple[dict[str, object], ...],
+) -> None:
+    secret = "TOP_SECRET_REFERENCE_PATCH"
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+        sample=_gold_audit_sample(trajectory=trajectory),
+    )
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    finding = json.loads(findings.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["structural_scan"] == {"status": "FAIL", "finding_count": 1}
+    assert finding["reason_code"] == "forbidden_gold_reference_patch"
+    assert set(finding) == {"row_index", "sample_id", "reason_code", "reason"}
+    assert secret not in result.output
+    assert secret not in audit.read_text(encoding="utf-8")
+    assert secret not in findings.read_text(encoding="utf-8")
+
+
+def test_gold_audit_command_sanitizes_invalid_sample_validation_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    secret = "RAW_VALIDATION_SECRET"
+    sample_payload = json.loads(normalized.read_text(encoding="utf-8"))
+    sample_payload["unexpected_gold_field"] = secret
+    normalized.write_bytes(canonical_json_bytes(sample_payload))
+    normalized_identity = file_identity(normalized)
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload.update(
+        {
+            "normalized_sha256": normalized_identity[0],
+            "normalized_bytes": normalized_identity[1],
+        }
+    )
+    manifest.write_bytes(canonical_json_bytes(manifest_payload))
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    finding = json.loads(findings.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert finding["reason_code"] == "invalid_normalized_sample"
+    assert finding["sample_id"] is None
+    assert secret not in result.output
+    assert secret not in audit.read_text(encoding="utf-8")
+    assert secret not in findings.read_text(encoding="utf-8")
+
+
+def test_gold_audit_command_sanitizes_invalid_normalization_manifest_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    secret = "NORMALIZATION_MANIFEST_SECRET_SENTINEL"
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload["unexpected_secret"] = secret
+    manifest.write_bytes(canonical_json_bytes(manifest_payload))
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 2
+    assert "invalid normalization manifest evidence" in result.output
+    assert secret not in result.output
+    assert not audit.exists()
+    assert not findings.exists()
+
+
+@pytest.mark.parametrize("duplicate_scope", ["top-level", "nested"])
+def test_gold_audit_command_rejects_duplicate_object_keys_recursively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate_scope: str,
+) -> None:
+    secret = "SHADOWED_GOLDEN_PATCH_SECRET"
+    sample = (
+        _gold_audit_sample()
+        if duplicate_scope == "top-level"
+        else _gold_audit_sample(trajectory=({"role": "tool", "payload": {"note": "safe"}},))
+    )
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+        sample=sample,
+    )
+    payload = json.loads(normalized.read_text(encoding="utf-8"))
+    raw_row = canonical_json_bytes(payload).decode("utf-8")
+    if duplicate_scope == "top-level":
+        safe_value = json.dumps(
+            payload["trajectory"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        needle = f'"trajectory":{safe_value}'
+        replacement = f'"trajectory":[{{"golden_patch":"{secret}"}}],{needle}'
+    else:
+        needle = '"payload":{"note":"safe"}'
+        replacement = f'"payload":{{"golden_patch":"{secret}"}},"payload":{{"note":"safe"}}'
+    assert raw_row.count(needle) == 1
+    _replace_gold_audit_input(
+        normalized,
+        manifest,
+        raw_row.replace(needle, replacement).encode("utf-8"),
+    )
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 1, result.output
+    audit_payload = json.loads(audit.read_text(encoding="utf-8"))
+    finding = json.loads(findings.read_text(encoding="utf-8"))
+    assert audit_payload["status"] == "FAIL"
+    assert audit_payload["structural_scan"] == {"status": "FAIL", "finding_count": 1}
+    assert finding["reason_code"] == "invalid_normalized_sample"
+    assert finding["sample_id"] is None
+    assert secret not in result.output
+    assert secret not in audit.read_text(encoding="utf-8")
+    assert secret not in findings.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "raw_row",
+    [
+        b'{"secret":"MALFORMED_JSON_SECRET"\n',
+        b'["NON_OBJECT_JSON_SECRET"]\n',
+    ],
+)
+def test_gold_audit_command_maps_malformed_or_non_object_rows_to_sanitized_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raw_row: bytes,
+) -> None:
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    _replace_gold_audit_input(normalized, manifest, raw_row)
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    finding = json.loads(findings.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert finding["reason_code"] == "invalid_normalized_sample"
+    assert finding["sample_id"] is None
+    for secret in ("MALFORMED_JSON_SECRET", "NON_OBJECT_JSON_SECRET"):
+        assert secret not in result.output
+        assert secret not in audit.read_text(encoding="utf-8")
+        assert secret not in findings.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("mutated_field", "mutated_value", "message"),
+    [
+        ("normalized_sha256", "f" * 64, "coverage is inconsistent"),
+        ("unexpected", "field", "invalid oracle-isolation attestation"),
+    ],
+)
+def test_gold_audit_command_rejects_malformed_or_mismatched_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_field: str,
+    mutated_value: str,
+    message: str,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    payload = json.loads(attestation.read_text(encoding="utf-8"))
+    payload[mutated_field] = mutated_value
+    attestation.write_bytes(canonical_json_bytes(payload))
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert message in result.output
+    assert mutated_value not in result.output
+    assert not audit.exists()
+    assert not findings.exists()
+
+
+def test_gold_audit_command_rejects_an_unbound_normalized_path_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    alias = tmp_path / "normalized-alias.jsonl"
+    alias.write_bytes(normalized.read_bytes())
+
+    result = _invoke_gold_audit(
+        alias,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert "artifact path does not match" in result.output
+    assert not audit.exists()
+    assert not findings.exists()
+
+
+def test_gold_audit_command_rejects_preexisting_audit_output_before_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    audit.write_text("preserve me\n", encoding="utf-8")
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert "audit output already exists" in result.output
+    assert audit.read_text(encoding="utf-8") == "preserve me\n"
+    assert not findings.exists()
+
+
+def test_gold_audit_command_rejects_colliding_output_paths_before_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, _ = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+
+    same_output = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        audit,
+        attestation=attestation,
+    )
+    staged_input_collision = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        normalized,
+        attestation=attestation,
+    )
+
+    assert same_output.exit_code == 2
+    assert "must be distinct" in same_output.output
+    assert staged_input_collision.exit_code == 2
+    assert "must not collide with staged inputs" in staged_input_collision.output
+    assert not audit.exists()
+
+
+def test_gold_audit_command_publishes_fail_for_population_count_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+        sample_count=2,
+    )
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["expected_sample_count"] == 2
+    assert payload["audited_sample_count"] == 1
+    assert payload["structural_scan"] == {"status": "FAIL", "finding_count": 0}
+    assert payload["oracle_isolation"]["status"] == "FAIL"
+
+
+def test_gold_audit_command_never_passes_an_empty_population(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, _, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    normalized.write_bytes(b"")
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_payload.update(
+        {
+            "status": "FAIL",
+            "input_row_count": 0,
+            "accepted_count": 0,
+            "unique_rollout_key_count": 0,
+            "normalized_sha256": file_identity(normalized)[0],
+            "normalized_bytes": 0,
+        }
+    )
+    manifest.write_bytes(canonical_json_bytes(manifest_payload))
+
+    result = _invoke_gold_audit(normalized, manifest, audit, findings)
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["expected_sample_count"] == payload["audited_sample_count"] == 0
+
+
+def test_gold_audit_command_rechecks_inputs_at_audit_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    original_writer = cli_module.write_immutable_json
+
+    def mutate_on_publish(path, value, *, before_publish=None):
+        def mutate_then_verify() -> object:
+            normalized.write_bytes(normalized.read_bytes() + b" ")
+            return before_publish() if before_publish is not None else None
+
+        return original_writer(path, value, before_publish=mutate_then_verify)
+
+    monkeypatch.setattr(cli_module, "write_immutable_json", mutate_on_publish)
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert "input changed while it was being processed" in result.output
+    assert findings.exists()
+    assert not audit.exists()

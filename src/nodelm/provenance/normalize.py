@@ -20,7 +20,7 @@ class UnknownResolutionError(NormalizationError):
 
 
 _PATCH_TOKENS = frozenset({"patch", "diff"})
-_REFERENCE_TOKENS = frozenset({"gold", "reference", "ref", "oracle", "groundtruth"})
+_REFERENCE_TOKENS = frozenset({"gold", "golden", "reference", "ref", "oracle", "groundtruth"})
 
 
 def _field_tokens(field: object) -> frozenset[str]:
