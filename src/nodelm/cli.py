@@ -87,6 +87,13 @@ from nodelm.provenance.gold import (
     OracleIsolationAttestation,
     require_authorized_gold_audit,
 )
+from nodelm.provenance.manifests import (
+    TASK_PROVENANCE_SAFE_FIELDS,
+    NormalizationManifestV2,
+    SnapshotMaterializationManifestV1,
+    SnapshotMaterializationManifestV2,
+    TaskProvenanceProjectionManifestV1,
+)
 from nodelm.provenance.normalize import (
     NormalizationError,
     UnknownResolutionError,
@@ -620,7 +627,7 @@ def datasets_materialize(
         raise typer.BadParameter(f"snapshot materialization failed: {error}") from error
     output_identity = _published_artifact_identity(result.path, result.digest)
     manifest_path = manifest_output or output.with_name(f"{output.stem}.manifest.json")
-    manifest = {
+    manifest_payload = {
         "schema_version": (
             "nodelm.snapshot-materialization/v2"
             if selected_partition is not None
@@ -636,7 +643,7 @@ def datasets_materialize(
         "max_rows": max_rows,
         "files": [
             {
-                "path": os.path.relpath(path, start=snapshot_root),
+                "path": path.relative_to(snapshot_root).as_posix(),
                 "sha256": identity[0],
                 "bytes": identity[1],
             }
@@ -646,12 +653,13 @@ def datasets_materialize(
         "output_sha256": result.digest,
         "output_bytes": output_identity[1],
     }
+    manifest: SnapshotMaterializationManifestV1 | SnapshotMaterializationManifestV2
     if (
         selected_partition is not None
         and contract_identity is not None
         and receipt_identity is not None
     ):
-        manifest.update(
+        manifest_payload.update(
             {
                 "materialization_scope": (
                     "canary" if max_rows is not None else "complete-partition"
@@ -670,6 +678,9 @@ def datasets_materialize(
                 "normalization_status": selected_partition.normalization_status.value,
             }
         )
+        manifest = SnapshotMaterializationManifestV2.model_validate(manifest_payload)
+    else:
+        manifest = SnapshotMaterializationManifestV1.model_validate(manifest_payload)
 
     def verify_completion_boundary() -> None:
         verify_inputs()
@@ -677,7 +688,7 @@ def datasets_materialize(
 
     manifest_result = write_immutable_json(
         manifest_path,
-        manifest,
+        manifest.model_dump(mode="json"),
         before_publish=verify_completion_boundary,
     )
     typer.echo(
@@ -805,50 +816,44 @@ def datasets_project_task_provenance(
 
     verify_inputs()
     manifest_path = manifest_output or output.with_name(f"{output.stem}.manifest.json")
-    manifest = {
-        "schema_version": "nodelm.task-provenance-projection/v1",
-        "status": (
-            VerificationStatus.PASS.value if admitted_count else VerificationStatus.FAIL.value
-        ),
-        "source_name": source.name,
-        "source_repository_id": source.repository_id,
-        "source_revision": source.revision,
-        "registry_sha256": config_identity[0],
-        "registry_bytes": config_identity[1],
-        "transfer_receipt_sha256": receipt_identity[0],
-        "transfer_receipt_bytes": receipt_identity[1],
-        "snapshot_sha256": receipt.snapshot.snapshot_sha256,
-        "projection_scope": "filtered" if patterns else "complete-snapshot",
-        "file_patterns": patterns,
-        "files": [
-            {
-                "path": path.relative_to(snapshot_root).as_posix(),
-                "sha256": identity[0],
-                "bytes": identity[1],
-            }
-            for path, identity in identities
-        ],
-        "safe_fields": [
-            "instance_id",
-            "repository",
-            "base_commit",
-            "repository_license",
-            "language",
-            "source_dataset",
-            "source_dataset_revision",
-        ],
-        "admitted_count": admitted_count,
-        "rejected_count": rejected_count,
-        "rejection_counts_by_code": rejection_counts,
-        "output": os.path.relpath(admitted_result.path, start=manifest_path.resolve().parent),
-        "output_sha256": admitted_result.digest,
-        "output_bytes": admitted_identity[1],
-        "rejection_artifact": os.path.relpath(
-            rejection_result.path, start=manifest_path.resolve().parent
-        ),
-        "rejection_sha256": rejection_result.digest,
-        "rejection_bytes": rejection_identity[1],
-    }
+    manifest = TaskProvenanceProjectionManifestV1.model_validate(
+        {
+            "schema_version": "nodelm.task-provenance-projection/v1",
+            "status": (
+                VerificationStatus.PASS.value if admitted_count else VerificationStatus.FAIL.value
+            ),
+            "source_name": source.name,
+            "source_repository_id": source.repository_id,
+            "source_revision": source.revision,
+            "registry_sha256": config_identity[0],
+            "registry_bytes": config_identity[1],
+            "transfer_receipt_sha256": receipt_identity[0],
+            "transfer_receipt_bytes": receipt_identity[1],
+            "snapshot_sha256": receipt.snapshot.snapshot_sha256,
+            "projection_scope": "filtered" if patterns else "complete-snapshot",
+            "file_patterns": patterns,
+            "files": [
+                {
+                    "path": path.relative_to(snapshot_root).as_posix(),
+                    "sha256": identity[0],
+                    "bytes": identity[1],
+                }
+                for path, identity in identities
+            ],
+            "safe_fields": TASK_PROVENANCE_SAFE_FIELDS,
+            "admitted_count": admitted_count,
+            "rejected_count": rejected_count,
+            "rejection_counts_by_code": rejection_counts,
+            "output": os.path.relpath(admitted_result.path, start=manifest_path.resolve().parent),
+            "output_sha256": admitted_result.digest,
+            "output_bytes": admitted_identity[1],
+            "rejection_artifact": os.path.relpath(
+                rejection_result.path, start=manifest_path.resolve().parent
+            ),
+            "rejection_sha256": rejection_result.digest,
+            "rejection_bytes": rejection_identity[1],
+        }
+    )
 
     def verify_completion_boundary() -> None:
         verify_inputs()
@@ -857,7 +862,7 @@ def datasets_project_task_provenance(
 
     manifest_result = write_immutable_json(
         manifest_path,
-        manifest,
+        manifest.model_dump(mode="json"),
         before_publish=verify_completion_boundary,
     )
     typer.echo(
@@ -903,12 +908,17 @@ def datasets_normalize(
         raise typer.BadParameter("normalization requires a registry-verified pinned source")
     input_identity = file_identity(input_path)
     task_identity = file_identity(task_provenance)
-    materialization, materialization_identity = _read_json_mapping_with_identity(
+    materialization_payload, materialization_identity = _read_json_mapping_with_identity(
         materialization_manifest
     )
-    task_manifest, task_manifest_identity = _read_json_mapping_with_identity(
+    task_manifest_payload, task_manifest_identity = _read_json_mapping_with_identity(
         task_provenance_manifest
     )
+    try:
+        materialization = SnapshotMaterializationManifestV2.model_validate(materialization_payload)
+        task_manifest = TaskProvenanceProjectionManifestV1.model_validate(task_manifest_payload)
+    except ValidationError as error:
+        raise typer.BadParameter(f"invalid normalization manifest evidence: {error}") from error
     try:
         contract_payload = partition_contract.read_bytes()
         contract_identity = (content_digest(contract_payload), len(contract_payload))
@@ -933,48 +943,44 @@ def datasets_normalize(
     ):
         raise typer.BadParameter("partition contract does not match the dataset registry")
 
-    if materialization.get("schema_version") != "nodelm.snapshot-materialization/v2":
-        raise typer.BadParameter("normalization requires a partition-bound v2 materialization")
-    if materialization.get("status") != VerificationStatus.PASS.value:
+    if materialization.status != VerificationStatus.PASS.value:
         raise typer.BadParameter("materialization manifest is not PASS")
     if (
-        materialization.get("source_name") != source.name
-        or materialization.get("source_repository_id") != source.repository_id
-        or materialization.get("source_revision") != source.revision
-        or materialization.get("registry_sha256") != config_identity[0]
+        materialization.source_name != source.name
+        or materialization.source_repository_id != source.repository_id
+        or materialization.source_revision != source.revision
+        or materialization.registry_sha256 != config_identity[0]
     ):
         raise typer.BadParameter("materialization manifest source does not match normalization")
     if (
-        materialization.get("output_sha256") != input_identity[0]
-        or materialization.get("output_bytes") != input_identity[1]
+        materialization.output_sha256 != input_identity[0]
+        or materialization.output_bytes != input_identity[1]
     ):
         raise typer.BadParameter("materialization manifest output identity does not match --input")
-    materialized_artifact = materialization.get("output")
-    if not isinstance(materialized_artifact, str) or not materialized_artifact:
-        raise typer.BadParameter("materialization manifest is missing its output artifact")
-    materialized_path = Path(materialized_artifact)
+    materialized_path = Path(materialization.output)
     if not materialized_path.is_absolute():
         materialized_path = materialization_manifest.resolve().parent / materialized_path
     if materialized_path.resolve() != input_path.resolve():
         raise typer.BadParameter("materialization manifest output path does not match --input")
     if (
-        materialization.get("partition_contract_sha256") != contract_identity[0]
-        or materialization.get("partition_contract_bytes") != contract_identity[1]
-        or materialization.get("transfer_receipt_sha256") != receipt_identity[0]
-        or materialization.get("transfer_receipt_bytes") != receipt_identity[1]
+        materialization.partition_contract_sha256 != contract_identity[0]
+        or materialization.partition_contract_bytes != contract_identity[1]
+        or materialization.transfer_receipt_sha256 != receipt_identity[0]
+        or materialization.transfer_receipt_bytes != receipt_identity[1]
     ):
         raise typer.BadParameter("materialization manifest partition evidence is inconsistent")
 
-    manifest_partition_name = materialization.get("partition_name")
-    if not isinstance(manifest_partition_name, str):
-        raise typer.BadParameter("materialization manifest is missing partition_name")
     try:
-        selected_partition = contract.by_name(manifest_partition_name)
+        selected_partition = contract.by_name(materialization.partition_name)
     except PartitionContractError as error:
         raise typer.BadParameter(str(error)) from error
     if selected_partition.normalization_status is not VerificationStatus.PASS:
         raise typer.BadParameter(
             f"trace partition is blocked from normalization: {selected_partition.name}"
+        )
+    if materialization.file_patterns != selected_partition.file_patterns:
+        raise typer.BadParameter(
+            "materialization file patterns do not match the selected partition"
         )
     receipt_partition_files = {
         identity.path: (identity.sha256, identity.bytes)
@@ -984,43 +990,20 @@ def datasets_normalize(
             for pattern in selected_partition.file_patterns
         )
     }
-    manifest_files = materialization.get("files")
-    if not isinstance(manifest_files, list) or any(
-        not isinstance(item, dict)
-        or not isinstance(item.get("path"), str)
-        or not isinstance(item.get("sha256"), str)
-        or not isinstance(item.get("bytes"), int)
-        for item in manifest_files
-    ):
-        raise typer.BadParameter("materialization manifest file identities are malformed")
     materialized_files = {
-        str(item["path"]): (str(item["sha256"]), int(item["bytes"])) for item in manifest_files
+        identity.path: (identity.sha256, identity.bytes) for identity in materialization.files
     }
     if (
-        len(materialized_files) != len(manifest_files)
+        len(materialized_files) != len(materialization.files)
         or materialized_files != receipt_partition_files
     ):
         raise typer.BadParameter("materialization files do not match the receipt-bound partition")
-    materialized_row_count = materialization.get("row_count")
-    materialized_max_rows = materialization.get("max_rows")
-    if (
-        not isinstance(materialized_row_count, int)
-        or isinstance(materialized_row_count, bool)
-        or materialized_row_count < 0
-        or (
-            materialized_max_rows is not None
-            and (
-                not isinstance(materialized_max_rows, int)
-                or isinstance(materialized_max_rows, bool)
-                or materialized_max_rows < 1
-            )
-        )
-    ):
-        raise typer.BadParameter("materialization manifest row bounds are malformed")
+    materialized_row_count = materialization.row_count
+    materialized_max_rows = materialization.max_rows
     expected_materialization_scope = (
         "canary" if materialized_max_rows is not None else "complete-partition"
     )
-    if materialization.get("materialization_scope") != expected_materialization_scope:
+    if materialization.materialization_scope != expected_materialization_scope:
         raise typer.BadParameter("materialization scope does not match its max_rows bound")
 
     trace_snapshot_inputs = _receipt_bound_snapshot_files(
@@ -1055,7 +1038,9 @@ def datasets_normalize(
         "task_source_revision": selected_partition.task_source_revision,
         "normalization_status": VerificationStatus.PASS.value,
     }
-    if any(materialization.get(key) != value for key, value in expected_partition_fields.items()):
+    if any(
+        getattr(materialization, key) != value for key, value in expected_partition_fields.items()
+    ):
         raise typer.BadParameter("materialization manifest partition labels are inconsistent")
     if expected_harness is not None and expected_harness != selected_partition.harness:
         raise typer.BadParameter("--expect-harness does not match the bound partition")
@@ -1101,74 +1086,46 @@ def datasets_normalize(
         )
     except SnapshotSealError as error:
         raise typer.BadParameter(str(error)) from error
-    if task_manifest.get("schema_version") != "nodelm.task-provenance-projection/v1":
-        raise typer.BadParameter("unsupported task provenance manifest schema_version")
-    if task_manifest.get("status") != VerificationStatus.PASS.value:
+    if task_manifest.status != VerificationStatus.PASS.value:
         raise typer.BadParameter("task provenance manifest is not PASS")
     if (
-        task_manifest.get("source_name") != task_source_name
-        or task_manifest.get("source_revision") != task_source_revision
-        or task_manifest.get("registry_sha256") != config_identity[0]
-        or task_manifest.get("projection_scope") != "complete-snapshot"
-        or task_manifest.get("transfer_receipt_sha256") != task_receipt_identity[0]
-        or task_manifest.get("transfer_receipt_bytes") != task_receipt_identity[1]
-        or task_manifest.get("snapshot_sha256") != task_receipt.snapshot.snapshot_sha256
+        task_manifest.source_name != task_source_name
+        or task_manifest.source_repository_id != task_source.repository_id
+        or task_manifest.source_revision != task_source_revision
+        or task_manifest.registry_sha256 != config_identity[0]
+        or task_manifest.registry_bytes != config_identity[1]
+        or task_manifest.projection_scope != "complete-snapshot"
+        or task_manifest.file_patterns
+        or task_manifest.transfer_receipt_sha256 != task_receipt_identity[0]
+        or task_manifest.transfer_receipt_bytes != task_receipt_identity[1]
+        or task_manifest.snapshot_sha256 != task_receipt.snapshot.snapshot_sha256
     ):
         raise typer.BadParameter("task provenance manifest does not match the bound task source")
     if (
-        task_manifest.get("output_sha256") != task_identity[0]
-        or task_manifest.get("output_bytes") != task_identity[1]
+        task_manifest.output_sha256 != task_identity[0]
+        or task_manifest.output_bytes != task_identity[1]
     ):
         raise typer.BadParameter("task provenance manifest output does not match its artifact")
-    task_artifact = task_manifest.get("output")
-    if not isinstance(task_artifact, str) or not task_artifact:
-        raise typer.BadParameter("task provenance manifest is missing its output artifact")
-    task_artifact_path = Path(task_artifact)
+    task_artifact_path = Path(task_manifest.output)
     if not task_artifact_path.is_absolute():
         task_artifact_path = task_provenance_manifest.resolve().parent / task_artifact_path
     if task_artifact_path.resolve() != task_provenance.resolve():
         raise typer.BadParameter("task provenance manifest output path does not match artifact")
-    required_safe_fields = {
-        "instance_id",
-        "repository",
-        "base_commit",
-        "repository_license",
-        "language",
-        "source_dataset",
-        "source_dataset_revision",
-    }
-    safe_fields = task_manifest.get("safe_fields")
-    if (
-        not isinstance(safe_fields, list)
-        or any(not isinstance(field, str) for field in safe_fields)
-        or set(safe_fields) != required_safe_fields
-    ):
+    if task_manifest.safe_fields != TASK_PROVENANCE_SAFE_FIELDS:
         raise typer.BadParameter("task provenance manifest safe field contract is incomplete")
     task_receipt_files = {
         identity.path: (identity.sha256, identity.bytes) for identity in task_receipt.snapshot.files
     }
-    projected_files = task_manifest.get("files")
-    if not isinstance(projected_files, list) or any(
-        not isinstance(item, dict)
-        or not isinstance(item.get("path"), str)
-        or not isinstance(item.get("sha256"), str)
-        or not isinstance(item.get("bytes"), int)
-        for item in projected_files
-    ):
-        raise typer.BadParameter("task provenance manifest file identities are malformed")
     task_manifest_files = {
-        str(item["path"]): (str(item["sha256"]), int(item["bytes"])) for item in projected_files
+        identity.path: (identity.sha256, identity.bytes) for identity in task_manifest.files
     }
     if (
-        len(task_manifest_files) != len(projected_files)
+        len(task_manifest_files) != len(task_manifest.files)
         or task_manifest_files != task_receipt_files
     ):
         raise typer.BadParameter("task provenance files do not match the sealed task receipt")
 
-    task_rejection_artifact = task_manifest.get("rejection_artifact")
-    if not isinstance(task_rejection_artifact, str) or not task_rejection_artifact:
-        raise typer.BadParameter("task provenance manifest is missing its rejection artifact")
-    task_rejection_path = Path(task_rejection_artifact)
+    task_rejection_path = Path(task_manifest.rejection_artifact)
     if not task_rejection_path.is_absolute():
         task_rejection_path = task_provenance_manifest.resolve().parent / task_rejection_path
     try:
@@ -1176,8 +1133,8 @@ def datasets_normalize(
     except OSError as error:
         raise typer.BadParameter(f"unable to read task rejection artifact: {error}") from error
     if (
-        task_manifest.get("rejection_sha256") != task_rejection_identity[0]
-        or task_manifest.get("rejection_bytes") != task_rejection_identity[1]
+        task_manifest.rejection_sha256 != task_rejection_identity[0]
+        or task_manifest.rejection_bytes != task_rejection_identity[1]
     ):
         raise typer.BadParameter("task rejection artifact identity does not match its manifest")
 
@@ -1204,9 +1161,9 @@ def datasets_normalize(
     if (
         replayed_task_identity != task_identity
         or replayed_rejection_identity != task_rejection_identity
-        or task_manifest.get("admitted_count") != replayed_admitted_count
-        or task_manifest.get("rejected_count") != replayed_rejected_count
-        or task_manifest.get("rejection_counts_by_code") != replayed_rejection_counts
+        or task_manifest.admitted_count != replayed_admitted_count
+        or task_manifest.rejected_count != replayed_rejected_count
+        or task_manifest.rejection_counts_by_code != replayed_rejection_counts
     ):
         raise typer.BadParameter(
             "task provenance is not the deterministic projection of its sealed snapshot"
@@ -1392,59 +1349,61 @@ def datasets_normalize(
 
     verify_inputs()
     manifest_path = manifest_output or output.with_name(f"{output.stem}.manifest.json")
-    manifest = {
-        "schema_version": "nodelm.normalization-manifest/v2",
-        "status": (
-            VerificationStatus.PASS.value if accepted_count else VerificationStatus.FAIL.value
-        ),
-        "source_name": source.name,
-        "source_repository_id": source.repository_id,
-        "source_revision": source.revision,
-        "partition_name": selected_partition.name,
-        "harness": selected_partition.harness,
-        "generating_model": selected_partition.generating_model,
-        "upstream_source": selected_partition.upstream_source,
-        "row_dataset_name": selected_partition.row_dataset_name,
-        "input_sha256": input_identity[0],
-        "input_bytes": input_identity[1],
-        "registry_sha256": config_identity[0],
-        "materialization_manifest_sha256": materialization_identity[0],
-        "materialization_manifest_bytes": materialization_identity[1],
-        "partition_contract_sha256": contract_identity[0],
-        "partition_contract_bytes": contract_identity[1],
-        "transfer_receipt_sha256": receipt_identity[0],
-        "transfer_receipt_bytes": receipt_identity[1],
-        "task_provenance_sha256": task_identity[0],
-        "task_provenance_bytes": task_identity[1],
-        "task_provenance_manifest_sha256": task_manifest_identity[0],
-        "task_provenance_manifest_bytes": task_manifest_identity[1],
-        "task_transfer_receipt_sha256": task_receipt_identity[0],
-        "task_transfer_receipt_bytes": task_receipt_identity[1],
-        "task_source_name": task_source_name,
-        "task_source_revision": task_source_revision,
-        "materialization_replay": VerificationStatus.PASS.value,
-        "task_provenance_replay": VerificationStatus.PASS.value,
-        "uniqueness_scope": expected_materialization_scope,
-        "input_row_count": input_row_count,
-        "accepted_count": accepted_count,
-        "rejected_count": rejected_count,
-        "rejection_counts_by_code": rejection_counts,
-        "unique_rollout_key_count": unique_rollout_key_count,
-        "duplicate_trace_row_count": duplicate_trace_row_count,
-        "conflicting_rollout_identity_count": conflicting_rollout_identity_count,
-        "conflicting_rollout_row_count": conflicting_rollout_row_count,
-        "gold_exposure_audit": VerificationStatus.NOT_RUN.value,
-        "normalized_artifact": os.path.relpath(
-            normalized_result.path, start=manifest_path.resolve().parent
-        ),
-        "normalized_sha256": normalized_result.digest,
-        "normalized_bytes": normalized_identity[1],
-        "rejection_artifact": os.path.relpath(
-            rejection_result.path, start=manifest_path.resolve().parent
-        ),
-        "rejection_sha256": rejection_result.digest,
-        "rejection_bytes": rejection_identity[1],
-    }
+    manifest = NormalizationManifestV2.model_validate(
+        {
+            "schema_version": "nodelm.normalization-manifest/v2",
+            "status": (
+                VerificationStatus.PASS.value if accepted_count else VerificationStatus.FAIL.value
+            ),
+            "source_name": source.name,
+            "source_repository_id": source.repository_id,
+            "source_revision": source.revision,
+            "partition_name": selected_partition.name,
+            "harness": selected_partition.harness,
+            "generating_model": selected_partition.generating_model,
+            "upstream_source": selected_partition.upstream_source,
+            "row_dataset_name": selected_partition.row_dataset_name,
+            "input_sha256": input_identity[0],
+            "input_bytes": input_identity[1],
+            "registry_sha256": config_identity[0],
+            "materialization_manifest_sha256": materialization_identity[0],
+            "materialization_manifest_bytes": materialization_identity[1],
+            "partition_contract_sha256": contract_identity[0],
+            "partition_contract_bytes": contract_identity[1],
+            "transfer_receipt_sha256": receipt_identity[0],
+            "transfer_receipt_bytes": receipt_identity[1],
+            "task_provenance_sha256": task_identity[0],
+            "task_provenance_bytes": task_identity[1],
+            "task_provenance_manifest_sha256": task_manifest_identity[0],
+            "task_provenance_manifest_bytes": task_manifest_identity[1],
+            "task_transfer_receipt_sha256": task_receipt_identity[0],
+            "task_transfer_receipt_bytes": task_receipt_identity[1],
+            "task_source_name": task_source_name,
+            "task_source_revision": task_source_revision,
+            "materialization_replay": VerificationStatus.PASS.value,
+            "task_provenance_replay": VerificationStatus.PASS.value,
+            "uniqueness_scope": expected_materialization_scope,
+            "input_row_count": input_row_count,
+            "accepted_count": accepted_count,
+            "rejected_count": rejected_count,
+            "rejection_counts_by_code": rejection_counts,
+            "unique_rollout_key_count": unique_rollout_key_count,
+            "duplicate_trace_row_count": duplicate_trace_row_count,
+            "conflicting_rollout_identity_count": conflicting_rollout_identity_count,
+            "conflicting_rollout_row_count": conflicting_rollout_row_count,
+            "gold_exposure_audit": VerificationStatus.NOT_RUN.value,
+            "normalized_artifact": os.path.relpath(
+                normalized_result.path, start=manifest_path.resolve().parent
+            ),
+            "normalized_sha256": normalized_result.digest,
+            "normalized_bytes": normalized_identity[1],
+            "rejection_artifact": os.path.relpath(
+                rejection_result.path, start=manifest_path.resolve().parent
+            ),
+            "rejection_sha256": rejection_result.digest,
+            "rejection_bytes": rejection_identity[1],
+        }
+    )
 
     def verify_completion_boundary() -> None:
         verify_inputs()
@@ -1453,7 +1412,7 @@ def datasets_normalize(
 
     manifest_result = write_immutable_json(
         manifest_path,
-        manifest,
+        manifest.model_dump(mode="json"),
         before_publish=verify_completion_boundary,
     )
     typer.echo(
@@ -1486,9 +1445,17 @@ def datasets_build_pilot(
     max_patch_bytes: int | None = typer.Option(None, min=1),
 ) -> None:
     input_identity = file_identity(input_path)
-    normalization, normalization_identity = _read_json_mapping_with_identity(normalization_manifest)
+    normalization_payload, normalization_identity = _read_json_mapping_with_identity(
+        normalization_manifest
+    )
     audit_payload, audit_identity = _read_json_mapping_with_identity(gold_exposure_audit)
     policy_payload, policy_identity = _read_yaml_mapping_with_identity(policy_config)
+    try:
+        normalization = NormalizationManifestV2.model_validate(normalization_payload)
+        pilot_policy = PilotPolicyConfig.model_validate(policy_payload)
+        audit = GoldExposureAudit.model_validate(audit_payload)
+    except ValidationError as error:
+        raise typer.BadParameter(f"invalid pilot safety evidence: {error}") from error
     registry, registry_identity = _load_registry_with_identity(registry_config)
     split_identity = file_identity(split_manifest)
     try:
@@ -1498,39 +1465,23 @@ def datasets_build_pilot(
         )
     except SplitAuthorizationError as error:
         raise typer.BadParameter(str(error)) from error
-    try:
-        pilot_policy = PilotPolicyConfig.model_validate(policy_payload)
-        audit = GoldExposureAudit.model_validate(audit_payload)
-    except ValidationError as error:
-        raise typer.BadParameter(f"invalid pilot safety evidence: {error}") from error
 
-    if (
-        normalization.get("schema_version") != "nodelm.normalization-manifest/v2"
-        or normalization.get("status") != VerificationStatus.PASS.value
-        or normalization.get("materialization_replay") != VerificationStatus.PASS.value
-        or normalization.get("task_provenance_replay") != VerificationStatus.PASS.value
-        or normalization.get("gold_exposure_audit") != VerificationStatus.NOT_RUN.value
-    ):
+    if normalization.status != VerificationStatus.PASS.value:
         raise typer.BadParameter("pilot requires a replay-verified PASS normalization manifest")
+    if normalization.uniqueness_scope != "complete-partition":
+        raise typer.BadParameter("pilot requires complete-partition normalization evidence")
     if (
-        normalization.get("normalized_sha256") != input_identity[0]
-        or normalization.get("normalized_bytes") != input_identity[1]
+        normalization.normalized_sha256 != input_identity[0]
+        or normalization.normalized_bytes != input_identity[1]
     ):
         raise typer.BadParameter("normalization manifest does not bind --input")
-    normalized_artifact = normalization.get("normalized_artifact")
-    if not isinstance(normalized_artifact, str) or not normalized_artifact:
-        raise typer.BadParameter("normalization manifest is missing normalized_artifact")
-    normalized_path = Path(normalized_artifact)
+    normalized_path = Path(normalization.normalized_artifact)
     if not normalized_path.is_absolute():
         normalized_path = normalization_manifest.resolve().parent / normalized_path
     if normalized_path.resolve() != input_path.resolve():
         raise typer.BadParameter("normalization manifest artifact path does not match --input")
-    normalized_count = normalization.get("accepted_count")
-    if (
-        not isinstance(normalized_count, int)
-        or isinstance(normalized_count, bool)
-        or normalized_count < 1
-    ):
+    normalized_count = normalization.accepted_count
+    if normalized_count < 1:
         raise typer.BadParameter("normalization manifest has no admitted samples")
 
     if audit.status is not VerificationStatus.PASS:
@@ -1595,9 +1546,9 @@ def datasets_build_pilot(
         or attestation.normalized_sha256 != input_identity[0]
         or attestation.normalized_bytes != input_identity[1]
         or attestation.covered_sample_count != normalized_count
-        or attestation.source_name != normalization.get("source_name")
-        or attestation.source_revision != normalization.get("source_revision")
-        or attestation.partition_name != normalization.get("partition_name")
+        or attestation.source_name != normalization.source_name
+        or attestation.source_revision != normalization.source_revision
+        or attestation.partition_name != normalization.partition_name
     ):
         raise typer.BadParameter("oracle-isolation attestation coverage is inconsistent")
 

@@ -32,6 +32,7 @@ def _write_pilot_safety_evidence(
     source_revision: str = "a" * 40,
     partition_name: str = "fixture/model/tasks",
     sample_count: int = 1,
+    uniqueness_scope: str = "complete-partition",
 ) -> tuple[Path, Path]:
     input_identity = file_identity(input_path)
     normalization_manifest = tmp_path / "normalized.manifest.json"
@@ -41,15 +42,48 @@ def _write_pilot_safety_evidence(
                 "schema_version": "nodelm.normalization-manifest/v2",
                 "status": "PASS",
                 "source_name": source_name,
+                "source_repository_id": f"owner/{source_name}",
                 "source_revision": source_revision,
                 "partition_name": partition_name,
+                "harness": "fixture",
+                "generating_model": "fixture@revision",
+                "upstream_source": "tasks",
+                "row_dataset_name": "owner/fixture-tasks",
+                "input_sha256": "1" * 64,
+                "input_bytes": 1,
+                "registry_sha256": "2" * 64,
+                "materialization_manifest_sha256": "3" * 64,
+                "materialization_manifest_bytes": 1,
+                "partition_contract_sha256": "4" * 64,
+                "partition_contract_bytes": 1,
+                "transfer_receipt_sha256": "5" * 64,
+                "transfer_receipt_bytes": 1,
+                "task_provenance_sha256": "6" * 64,
+                "task_provenance_bytes": 1,
+                "task_provenance_manifest_sha256": "7" * 64,
+                "task_provenance_manifest_bytes": 1,
+                "task_transfer_receipt_sha256": "8" * 64,
+                "task_transfer_receipt_bytes": 1,
+                "task_source_name": "fixture-tasks",
+                "task_source_revision": "c" * 40,
                 "materialization_replay": "PASS",
                 "task_provenance_replay": "PASS",
+                "uniqueness_scope": uniqueness_scope,
                 "gold_exposure_audit": "NOT RUN",
+                "input_row_count": sample_count,
                 "accepted_count": sample_count,
+                "rejected_count": 0,
+                "rejection_counts_by_code": {},
+                "unique_rollout_key_count": sample_count,
+                "duplicate_trace_row_count": 0,
+                "conflicting_rollout_identity_count": 0,
+                "conflicting_rollout_row_count": 0,
                 "normalized_artifact": input_path.name,
                 "normalized_sha256": input_identity[0],
                 "normalized_bytes": input_identity[1],
+                "rejection_artifact": "normalized.rejections.jsonl",
+                "rejection_sha256": "9" * 64,
+                "rejection_bytes": 0,
             }
         )
     )
@@ -405,6 +439,7 @@ def test_pilot_command_validates_and_writes_normalized_samples(
         tmp_path,
         input_path,
         monkeypatch,
+        uniqueness_scope="canary",
     )
     split_manifest = tmp_path / "split.json"
     split_manifest.write_text(
@@ -442,6 +477,36 @@ def test_pilot_command_validates_and_writes_normalized_samples(
         encoding="utf-8",
     )
     output = tmp_path / "pilot.json"
+
+    canary_result = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "build-pilot",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output),
+            "--normalization-manifest",
+            str(normalization_manifest),
+            "--gold-exposure-audit",
+            str(gold_audit),
+            "--split-manifest",
+            str(split_manifest),
+            "--registry",
+            str(registry),
+        ],
+    )
+
+    assert canary_result.exit_code == 2
+    assert "complete-partition" in canary_result.output
+    assert not output.exists()
+
+    normalization_manifest, gold_audit = _write_pilot_safety_evidence(
+        tmp_path,
+        input_path,
+        monkeypatch,
+    )
 
     result = CliRunner().invoke(
         app,

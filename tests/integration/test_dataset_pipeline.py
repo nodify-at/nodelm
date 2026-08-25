@@ -325,41 +325,69 @@ def test_snapshot_materializes_normalizes_splits_and_builds_a_pilot(
     assert "gold patch" not in task_provenance.read_text(encoding="utf-8")
     assert "problem_statement" not in task_provenance.read_text(encoding="utf-8")
 
-    normalize = runner.invoke(
-        app,
-        [
-            "datasets",
-            "normalize",
-            "--source",
-            "fixture-traces",
-            "--snapshot",
-            str(snapshot),
-            "--input",
-            str(raw),
-            "--output",
-            str(normalized),
-            "--materialization-manifest",
-            str(materialization_manifest),
-            "--partition-contract",
-            str(partition_contract),
-            "--transfer-receipt",
-            str(receipt_path),
-            "--expect-harness",
-            "fixture",
-            "--expect-generating-model",
-            "source-label:model",
-            "--task-provenance",
-            str(task_provenance),
-            "--task-provenance-manifest",
-            str(tmp_path / "tasks.safe.manifest.json"),
-            "--task-transfer-receipt",
-            str(task_receipt_path),
-            "--task-snapshot",
-            str(task_snapshot),
-            "--config",
-            str(registry),
-        ],
+    task_manifest_path = tmp_path / "tasks.safe.manifest.json"
+    normalize_arguments = [
+        "datasets",
+        "normalize",
+        "--source",
+        "fixture-traces",
+        "--snapshot",
+        str(snapshot),
+        "--input",
+        str(raw),
+        "--output",
+        str(normalized),
+        "--materialization-manifest",
+        str(materialization_manifest),
+        "--partition-contract",
+        str(partition_contract),
+        "--transfer-receipt",
+        str(receipt_path),
+        "--expect-harness",
+        "fixture",
+        "--expect-generating-model",
+        "source-label:model",
+        "--task-provenance",
+        str(task_provenance),
+        "--task-provenance-manifest",
+        str(task_manifest_path),
+        "--task-transfer-receipt",
+        str(task_receipt_path),
+        "--task-snapshot",
+        str(task_snapshot),
+        "--config",
+        str(registry),
+    ]
+
+    def assert_manifest_tampering_rejected(
+        path: Path,
+        field: str,
+        value: object,
+    ) -> None:
+        original = path.read_bytes()
+        payload = json.loads(original)
+        payload[field] = value
+        path.write_bytes(canonical_json_bytes(payload))
+        try:
+            result = runner.invoke(app, normalize_arguments)
+        finally:
+            path.write_bytes(original)
+        assert result.exit_code == 2, result.output
+
+    task_manifest_payload = json.loads(task_manifest_path.read_text(encoding="utf-8"))
+    for field, value in (
+        ("source_repository_id", "attacker/fixture-tasks"),
+        ("registry_bytes", task_manifest_payload["registry_bytes"] + 1),
+        ("file_patterns", ["tasks.jsonl"]),
+    ):
+        assert_manifest_tampering_rejected(task_manifest_path, field, value)
+    assert_manifest_tampering_rejected(
+        materialization_manifest,
+        "file_patterns",
+        ["data/fixture/model/tasks/attacker-*.jsonl"],
     )
+
+    normalize = runner.invoke(app, normalize_arguments)
     assert normalize.exit_code == 0, normalize.output
     normalization_manifest = json.loads(
         (tmp_path / "normalized.manifest.json").read_text(encoding="utf-8")
