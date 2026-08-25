@@ -2,10 +2,12 @@
 
 Real transfer and receipt-bound core audit status: `PASS` (completed 2026-08-24)
 
-Normalization, decontamination, and split freezing remain `NOT RUN`. The completed snapshots and
-raw evidence live outside Git under `/workspace/nodelm` on persistent storage; their compact
-digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is currently required.
-Use this runbook only for recovery or an explicitly authorized re-execution on a new, empty
+One real receipt-replayed normalization canary is now `PASS`; full-partition normalization,
+gold-exposure auditing, decontamination, and split freezing remain `NOT RUN`. The completed
+snapshots and raw evidence live outside Git under `/workspace/nodelm` on persistent storage;
+their compact digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is
+currently required. Use this runbook only for recovery or an explicitly authorized re-execution
+on a new, empty
 external-volume destination. Never run the transfer commands from the local project workspace.
 
 ## Completed evidence and safeguards

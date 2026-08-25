@@ -162,9 +162,9 @@ See [CODEX.md](CODEX.md) for future agent-development rules and
 `NodeLM_TypeScript_Node_Distillation_Plan.md` is now the tracked project ground truth. Its three
 student candidates and primary teacher are pinned in strict metadata contracts. Metadata,
 offline synthetic contract verification, and the real receipt-bound transfer/core audit/lineage
-for all three sources are `PASS`. Partition-safe task projection and normalization tooling is
-implemented, while real-source normalization evidence is recorded separately when run.
-Decontamination, split and pilot construction,
-model execution, the 50–100-task candidate bake-off, student selection, and training remain
-`NOT RUN`. See
+for all three sources are `PASS`. The complete V2 safe projection and one 1,000-row
+receipt-replayed normalization canary are also `PASS`; exact evidence is in
+[`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Full-partition normalization, gold-exposure
+auditing, decontamination, split and pilot construction, model execution, the 50–100-task
+candidate bake-off, student selection, and training remain `NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

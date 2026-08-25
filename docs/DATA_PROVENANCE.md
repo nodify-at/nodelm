@@ -87,5 +87,12 @@ A normalized manifest deliberately records gold-exposure auditing as `NOT RUN` u
 oracle-isolated comparison is executed. Partition-safe normalization alone is not permission to
 train.
 
+Execution note (2026-08-25): the complete pinned V2 task projection and a 1,000-row
+OpenHands/MiniMax normalization canary passed both deterministic raw replays at commit
+`7366ec06e8c2bb098afc02382e38b5b57f6e9b5d`. The canary admitted 783 rows and retained 217
+unknown-resolution rejections. This is canary evidence only; full-partition normalization and
+the separate gold-exposure/decontamination gates remain `NOT RUN`. Exact hashes and the truthful
+all-unknown Qwen36 canary failure are in `docs/EXPERIMENTS.md`.
+
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

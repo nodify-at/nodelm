@@ -29,7 +29,20 @@ receipt-bound complete-snapshot audits and lineage manifests report `PASS` acros
 and 49,734,682,463 supported bytes, with 33,937 license-gate rejections retained in complete
 ledgers. The compact digest-bound evidence index is
 `artifacts/reports/FULL_DATASET_AUDIT.md`; the raw snapshots and evidence remain outside Git.
-This completes the core snapshot-audit prerequisite, not normalization or decontamination.
+This completes the core snapshot-audit prerequisite, not full normalization or decontamination.
+
+## Real-source projection and normalization canary complete
+
+At commit `7366ec06e8c2bb098afc02382e38b5b57f6e9b5d`, the complete pinned SWE-rebench V2
+snapshot produced a receipt-replayed, gold-free task projection with 26,056 admitted and 6,023
+license rejections. A 1,000-row OpenHands/MiniMax leaf canary then replayed both raw snapshot
+chains and reported `PASS`: 783 normalized rows, 217 truthful unknown-resolution rejections, and
+no duplicate or conflicting rollout identities. An earlier ordered Qwen36 slice reported
+truthful `FAIL` because all 1,000 source resolution labels were unknown. Both outcomes and exact
+hashes are recorded in `docs/EXPERIMENTS.md`; raw evidence remains on persistent external storage.
+
+This establishes real canary behavior only. Its normalized manifest deliberately records the
+gold-exposure audit as `NOT RUN`, so it is not permission to train.
 
 ## Still open by design
 
@@ -38,12 +51,14 @@ This completes the core snapshot-audit prerequisite, not normalization or decont
 - the frozen public/private evaluation manifests and measured near-duplicate threshold;
 - unique issue/PR counts, harness/model distributions, tokenizer-based trajectory lengths,
   exact/near patch duplication, and public-evaluation overlap;
-- real-source normalization, contamination-safe split freezing, and pilot construction;
+- full-partition real-source normalization, contamination-safe split freezing, and pilot
+  construction;
 - the Tier A–D quality policy and actual 10k pilot artifact;
 - model memory profiles and training topology. A paid host has been used for data work, but no
   strict model lifecycle or training measurement has run.
 
-Model metadata, offline synthetic contract verification, and receipt-bound transfer/core
-audit/lineage for all three real sources are `PASS`. Normalization, decontamination, split and
-pilot construction, model execution, bake-off, student selection, and training remain
+Model metadata, offline synthetic contract verification, receipt-bound transfer/core audit and
+lineage for all three real sources, the complete V2 safe projection, and one real normalization
+canary are `PASS`. Full-partition normalization, gold-exposure auditing, decontamination, split
+and pilot construction, model execution, bake-off, student selection, and training remain
 `NOT RUN`. Recovery or re-execution follows `docs/DATA_DOWNLOAD_RUNBOOK.md`.
