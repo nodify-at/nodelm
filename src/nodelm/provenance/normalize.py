@@ -15,6 +15,10 @@ class NormalizationError(ValueError):
     """A raw record cannot satisfy the normalized provenance contract."""
 
 
+class UnknownResolutionError(NormalizationError):
+    """A trace has no verified solved/unsolved label and cannot enter sample v1."""
+
+
 _PATCH_TOKENS = frozenset({"patch", "diff"})
 _REFERENCE_TOKENS = frozenset({"gold", "reference", "ref", "oracle", "groundtruth"})
 

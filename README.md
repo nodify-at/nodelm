@@ -58,6 +58,55 @@ uv run nodelm datasets audit-snapshot \
   --lineage-output /large-volume/nodelm/audits/open-swe-traces.lineage.json \
   --rejections-output /large-volume/nodelm/audits/open-swe-traces.rejections.jsonl
 
+# On the persistent data host, project the complete pinned Rebench task snapshot into a
+# license-safe artifact that cannot contain task text or gold patches.
+uv run nodelm datasets project-task-provenance \
+  --source swe-rebench-v2 \
+  --snapshot /workspace/nodelm/snapshots/swe-rebench-v2 \
+  --transfer-receipt /workspace/nodelm/receipts/swe-rebench-v2.transfer.json \
+  --output /workspace/nodelm/derived/task-provenance/swe-rebench-v2.safe.jsonl
+
+# Materialize one receipt-bound Open-SWE leaf as a 1,000-row canary. Labels are derived from
+# the checked-in contract, and every selected raw file must match the sealed receipt.
+uv run nodelm datasets materialize \
+  --source open-swe-traces \
+  --snapshot /workspace/nodelm/snapshots/open-swe-traces \
+  --partition-contract configs/datasets/open-swe-trace-partitions.yaml \
+  --transfer-receipt /workspace/nodelm/receipts/open-swe-traces.transfer.json \
+  --partition openhands/qwen36_27b/swe-rebench-v2 \
+  --max-rows 1000 \
+  --output /workspace/nodelm/derived/canary/openhands-qwen36-v2.raw.jsonl
+
+# Normalize only with the two receipt chains and the complete safe task projection. The
+# optional expectations fail on a mismatch; they cannot relabel the partition.
+uv run nodelm datasets normalize \
+  --source open-swe-traces \
+  --snapshot /workspace/nodelm/snapshots/open-swe-traces \
+  --input /workspace/nodelm/derived/canary/openhands-qwen36-v2.raw.jsonl \
+  --materialization-manifest \
+    /workspace/nodelm/derived/canary/openhands-qwen36-v2.raw.manifest.json \
+  --partition-contract configs/datasets/open-swe-trace-partitions.yaml \
+  --transfer-receipt /workspace/nodelm/receipts/open-swe-traces.transfer.json \
+  --task-provenance \
+    /workspace/nodelm/derived/task-provenance/swe-rebench-v2.safe.jsonl \
+  --task-provenance-manifest \
+    /workspace/nodelm/derived/task-provenance/swe-rebench-v2.safe.manifest.json \
+  --task-transfer-receipt /workspace/nodelm/receipts/swe-rebench-v2.transfer.json \
+  --task-snapshot /workspace/nodelm/snapshots/swe-rebench-v2 \
+  --expect-harness openhands \
+  --expect-generating-model source-label:qwen36_27b \
+  --output /workspace/nodelm/derived/canary/openhands-qwen36-v2.normalized.jsonl
+
+# Pilot construction is intentionally unavailable from normalization alone. It also requires a
+# reviewed/code-authorized frozen split bound to the same bytes and a reviewed, code-authorized
+# PASS gold-exposure audit with complete oracle-isolation coverage.
+uv run nodelm datasets build-pilot \
+  --input /workspace/nodelm/derived/pilot/normalized.jsonl \
+  --normalization-manifest /workspace/nodelm/derived/pilot/normalized.manifest.json \
+  --gold-exposure-audit /workspace/nodelm/audits/pilot.gold-exposure.json \
+  --split-manifest /workspace/nodelm/derived/pilot/repository-split.json \
+  --output /workspace/nodelm/derived/pilot/pilot-sft.json
+
 # Verify the local repository harness against the fixture project.
 ./scripts/verify_harness.sh
 
@@ -99,9 +148,11 @@ bounded CPU/memory/process/file resources, and is force-removed in a `finally` c
 
 Model output is accepted only as a bounded, text-only Git patch. Protected repository-test paths
 reject symlinks in any path component. The fixed smoke harness is bound to one exact
-`SolveContext` and approved before/after source hashes; context or source-identity mismatches
-fail. A successful generic repository test command remains `UNVERIFIED` until an
-integrity-attested oracle can establish task resolution and regression-test integrity.
+`SolveContext`, a code-pinned complete regular-file fixture tree, and approved before/after source
+hashes. Evaluation reads a private identity-verified fixture copy and records the tree digest;
+context, file-set, or source-identity mismatches fail. A successful generic repository test
+command remains `UNVERIFIED` until an integrity-attested oracle can establish task resolution and
+regression-test integrity.
 
 See [CODEX.md](CODEX.md) for future agent-development rules and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system boundaries.
@@ -111,7 +162,9 @@ See [CODEX.md](CODEX.md) for future agent-development rules and
 `NodeLM_TypeScript_Node_Distillation_Plan.md` is now the tracked project ground truth. Its three
 student candidates and primary teacher are pinned in strict metadata contracts. Metadata,
 offline synthetic contract verification, and the real receipt-bound transfer/core audit/lineage
-for all three sources are `PASS`. Normalization, decontamination, split and pilot construction,
+for all three sources are `PASS`. Partition-safe task projection and normalization tooling is
+implemented, while real-source normalization evidence is recorded separately when run.
+Decontamination, split and pilot construction,
 model execution, the 50–100-task candidate bake-off, student selection, and training remain
 `NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

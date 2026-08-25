@@ -124,3 +124,72 @@ audits and lineage manifests passed. This fulfills the deferred transfer/core-au
 D-013; bulk materialization and the remaining Phase 0/decontamination gates remain `NOT RUN`.
 The snapshots and complete raw evidence stay on external persistent storage, while Git tracks
 their compact digest index in `artifacts/reports/FULL_DATASET_AUDIT.md`.
+
+## D-015 — partition and task provenance are separate receipt-bound contracts
+
+The sealed dataset registry remains unchanged because all three transfer receipts bind its exact
+SHA-256. Open-SWE's actual snapshot has 11 leaf partitions and one hyphenated path that cannot be
+represented truthfully by the registry's eight historical descriptive split labels. A separate
+strict partition contract therefore binds the Open-SWE source/revision, sealed registry,
+complete transfer receipt, complete snapshot, and every leaf's exact path, harness,
+source-native generating-model label, upstream task family, and normalization status.
+
+Partition materialization v2 selects exactly one contract leaf and verifies its complete file
+identity set against the transfer receipt. Normalization consumes and revalidates that manifest,
+contract, and receipt; command-line harness/model values are optional equality assertions only.
+The materialization digest, partition, and upstream task family enter every sample's lineage.
+
+Task sources cross the trace join only through a second immutable projection. It admits
+allowlisted repository licenses and emits only instance ID, repository, base commit, normalized
+license, canonical language, and pinned task-source identity. It physically excludes task text,
+gold/reference/test patches, installation data, and open metadata. Duplicate IDs with conflicting
+safe provenance, or with any rejectable provenance row, are wholly excluded while the original
+rejection cause remains in the ledger. The trace join is required and compares canonical
+repository, SPDX, language aliases, and case-insensitive commit identity.
+
+Normalized-sample v1 retains a boolean `resolved` field. Source values `-1` and null are recorded
+as `unknown_resolution` rejections rather than coerced to unresolved; a future tri-state schema
+requires an explicit version and sample-identity migration. Only the seven Open-SWE leaves backed
+by pinned SWE-rebench V2 task provenance can proceed. Four Scale-SWE leaves and all V2-PR joins
+remain `BLOCKED`. Even eligible normalized artifacts remain non-training-ready until the separate
+gold-exposure and decontamination gates pass.
+
+## D-016 — derived provenance is accepted only after deterministic replay
+
+Content-addressed manifests are completion markers, not independent trust roots. The code trust
+root pins the exact partition contract and all three real snapshot-transfer receipts by source
+revision. Materialization and task projection consume private identity-verified staged files;
+normalization additionally requires both raw snapshot roots and deterministically replays both
+derived inputs before joining them. Each terminal manifest is published last and revalidates its
+inputs and already-published sibling artifacts at the publication boundary.
+
+## D-017 — rollout conflicts and gold exposure fail closed before pilot construction
+
+Trace uniqueness is keyed by source revision, exact partition leaf, task family, canonical
+repository, instance ID, and rollout ID. A disk-backed projection admits one exact copy, preserves
+distinct rollout IDs, and rejects every occurrence when one key maps to conflicting raw rows.
+The raw-row digest enters normalized lineage so dropped source fields still affect sample identity.
+
+Normalization deliberately retains `gold_exposure_audit: NOT RUN`. `build-pilot` requires a
+separate reviewed and code-authorized `nodelm.gold-exposure-audit/v1` PASS artifact, complete
+oracle-isolation attestation, zero structural findings, a frozen split bound to the same input,
+and exact population counts. The training lifecycle rejects pilot manifests that omit this gate.
+
+## D-018 — split and pilot manifests enter training only through reviewed digests
+
+Repository-split construction reads normalized samples, task metadata, benchmark entries, and
+optional aliases only from private identity-verified copies, then rechecks the original inputs at
+immutable publication. Pilot construction accepts a split only when its exact digest is present
+in the code trust root for the normalized artifact digest. A structurally valid or self-authored
+split cannot relabel evaluation repositories as training repositories.
+
+The one-step lifecycle likewise accepts only the exact reviewed pilot-manifest digest authorized
+for the exact samples digest. It stages both files before parsing and rechecks config, samples,
+pilot, and the complete protected evaluation-fixture identity at terminal report publication.
+The fixture itself is a code-pinned regular-file tree: extra, missing, altered, symlink, and
+special-file entries fail before model execution, and patch evaluation consumes only a private
+identity-verified copy. The terminal report records the tree schema, digest, file count, and bytes.
+The reviewed pilot may retain `UNVERIFIED` while the checked-in pilot policy awaits empirical
+thresholds because this command verifies only one optimizer/checkpoint/resume lifecycle; scaled
+training remains blocked until that policy is deliberately frozen and promoted. Empty
+authorization maps mean no real split or pilot is approved by default.

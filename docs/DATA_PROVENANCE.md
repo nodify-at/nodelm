@@ -17,20 +17,44 @@ The normalization flow is:
    private staged view, publish a `nodelm.dataset-audit/v2` report that declares the aggregate
    identity algorithm, and publish a source-level lineage manifest that binds the receipt,
    registry, snapshot, logical rows, report, and ledger. Legacy raw-file audits remain v1.
-3. Materialize pinned Parquet/JSONL files without loading the snapshot into memory, then
-   normalize only records that satisfy the required provenance contract. When Open-SWE traces
-   lack base metadata, the disk-backed join copies only repository, base commit, license, and
-   language from the task source; it never copies task text or a gold patch.
-4. Apply the repository-license gate, count every rejection, retain bounded examples in the
-   summary, and write every rejected row to the sibling immutable JSONL ledger.
-5. Index task statements plus reference and generated patches only inside the disk-backed split
+3. Bind each Open-SWE leaf to the checked-in 11-partition contract. That contract preserves the
+   receipt-bound registry bytes while separately binding the exact snapshot path, harness,
+   source-native generating-model label, upstream task family, and normalization eligibility.
+   Partition materialization emits a v2 manifest whose selected files must match the complete
+   sealed receipt inventory for that leaf; caller-supplied labels are assertions, not provenance.
+   The source/revision trust root authorizes the exact partition-contract and snapshot-receipt
+   digests. Transformations read only private copies that match those identities.
+4. Project a pinned task snapshot into an immutable, license-safe artifact containing only
+   instance ID, repository, base commit, normalized repository license, canonical language, and
+   task-source identity. Task statements, reference patches, tests, installation metadata, and
+   open metadata cannot be represented in this projection. Missing, unsafe, or conflicting rows
+   enter a separate immutable rejection ledger. If any row with a usable instance ID is unsafe or
+   conflicts, every row for that instance is excluded and the underlying cause remains recorded.
+5. Normalize only against the matching partition materialization, partition contract, complete
+   task projection, both transfer receipts, and both raw snapshot roots. Replay materialization
+   and task projection from receipt-bound private staging and require exact derived identities;
+   a self-authored manifest is not a trust root. The disk-backed required join fails closed when
+   task provenance is absent and copies only the safe fields above. Each sample lineage includes
+   the raw-row digest, materialization digest, partition, upstream source, task source/revision,
+   and safe task artifact digest. A trace `resolved` value of `-1` or null is recorded as
+   `unknown_resolution`; it is never coerced to unresolved in boolean normalized-sample v1.
+6. Classify rollout identity in a temporary SQLite index scoped to source revision and exact
+   partition leaf. Preserve distinct rollout IDs, admit only the first exact duplicate, reject
+   all occurrences of a conflicting rollout key, and enforce accepted + rejected = input rows.
+7. Index task statements plus reference and generated patches only inside the disk-backed split
    gate. Exact and measured near matches form connected repository groups alongside declared
    mirrors/forks.
-6. Compare both task and patch fingerprints with an explicitly selected public benchmark.
+8. Compare both task and patch fingerprints with an explicitly selected public benchmark.
    Exclude every connected group containing a benchmark-overlap sample, then deterministically
-   assign the remaining groups to training or private evaluation.
-7. Derive a pilot manifest and companion training JSONL from the frozen split; never move
-   repositories across it. Pilot rows must carry a non-empty trajectory.
+   assign the remaining groups to training or private evaluation. Build the split only from
+   private identity-verified copies of every input and require its reviewed digest to be
+   authorized for the exact normalized artifact before pilot construction.
+9. Derive a pilot manifest and companion training JSONL only when the frozen split, normalization
+   manifest, and reviewed/code-authorized `PASS` gold-exposure audit bind the same normalized bytes
+   and complete row count. Re-scan every training-visible trajectory, retain oracle-isolation
+   attestation identity, and never move repositories across the split. The one-step lifecycle
+   also requires a reviewed pilot-manifest digest authorized for the exact samples digest and
+   consumes private identity-verified copies of both artifacts.
 
 Audit percentile, duplicate-ID, and rejection examples are capped and explicitly labeled when
 truncated. Complete counts and the rejection ledger remain available while dataset-cardinality
@@ -50,6 +74,18 @@ issue/PR counts, harness and generating-model distributions, tokenizer-based len
 exact/near patch duplication, and public-evaluation overlap remain explicitly `NOT RUN`.
 Per-example lineage is added later by strict normalized samples and remains distinct from this
 source-level artifact binding.
+
+The sealed registry remains byte-for-byte unchanged at SHA-256
+`f92315a70a0c75ec909d83f4cb639b3a320f62526069f11ca87f0fe1d891637f` because all three
+transfer receipts bind it. The separate Open-SWE partition contract corrects the observed
+hyphenated `deepseek-v4-flash` snapshot path without rewriting that historical evidence. Seven
+SWE-rebench-V2-backed leaves are eligible for safe projection and normalization. Four Scale-SWE
+leaves remain `BLOCKED` until a pinned task source and verified join are available. V2-PRs also
+remains blocked: it has no verified Open-SWE leaf relationship and no top-level language.
+
+A normalized manifest deliberately records gold-exposure auditing as `NOT RUN` until a separate
+oracle-isolated comparison is executed. Partition-safe normalization alone is not permission to
+train.
 
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

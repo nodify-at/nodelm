@@ -2,19 +2,113 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from nodelm.artifacts import canonical_json_bytes
+import nodelm.cli as cli_module
+from nodelm.artifacts import canonical_json_bytes, file_identity
 from nodelm.cli import app
 from nodelm.datasets.lineage import (
     DatasetSnapshotTransferReceipt,
     capture_snapshot_identity,
 )
+from nodelm.datasets.pilot import AUTHORIZED_PILOT_MANIFEST_SHA256_BY_SAMPLES_SHA256
+from nodelm.decontamination.split import AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256
+from nodelm.evaluation.fixture import MODEL_TASK_FIXTURE_IDENTITY
 from nodelm.harness import CommandResult, OutcomeCategory
 from nodelm.models import NormalizedSample
+from nodelm.provenance.gold import AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256
+
+
+def _write_pilot_safety_evidence(
+    tmp_path: Path,
+    input_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    source_name: str = "fixture",
+    source_revision: str = "a" * 40,
+    partition_name: str = "fixture/model/tasks",
+    sample_count: int = 1,
+) -> tuple[Path, Path]:
+    input_identity = file_identity(input_path)
+    normalization_manifest = tmp_path / "normalized.manifest.json"
+    normalization_manifest.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.normalization-manifest/v2",
+                "status": "PASS",
+                "source_name": source_name,
+                "source_revision": source_revision,
+                "partition_name": partition_name,
+                "materialization_replay": "PASS",
+                "task_provenance_replay": "PASS",
+                "gold_exposure_audit": "NOT RUN",
+                "accepted_count": sample_count,
+                "normalized_artifact": input_path.name,
+                "normalized_sha256": input_identity[0],
+                "normalized_bytes": input_identity[1],
+            }
+        )
+    )
+    findings = tmp_path / "gold.findings.jsonl"
+    findings.write_bytes(b"")
+    attestation = tmp_path / "oracle-isolation.json"
+    attestation.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.oracle-isolation-attestation/v1",
+                "method_version": "nodelm.oracle-isolation-review/v1",
+                "status": "PASS",
+                "source_name": source_name,
+                "source_revision": source_revision,
+                "partition_name": partition_name,
+                "normalized_sha256": input_identity[0],
+                "normalized_bytes": input_identity[1],
+                "covered_sample_count": sample_count,
+            }
+        )
+    )
+    normalization_identity = file_identity(normalization_manifest)
+    findings_identity = file_identity(findings)
+    attestation_identity = file_identity(attestation)
+    audit = tmp_path / "gold-exposure.audit.json"
+    audit.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.gold-exposure-audit/v1",
+                "method_version": "nodelm.gold-exposure-audit-method/v1",
+                "status": "PASS",
+                "normalization_manifest_artifact": normalization_manifest.name,
+                "normalization_manifest_sha256": normalization_identity[0],
+                "normalization_manifest_bytes": normalization_identity[1],
+                "normalized_artifact": input_path.name,
+                "normalized_sha256": input_identity[0],
+                "normalized_bytes": input_identity[1],
+                "expected_sample_count": sample_count,
+                "audited_sample_count": sample_count,
+                "structural_scan": {"status": "PASS", "finding_count": 0},
+                "oracle_isolation": {
+                    "status": "PASS",
+                    "attestation_artifact": attestation.name,
+                    "attestation_sha256": attestation_identity[0],
+                    "attestation_bytes": attestation_identity[1],
+                    "covered_sample_count": sample_count,
+                },
+                "findings_artifact": findings.name,
+                "findings_sha256": findings_identity[0],
+                "findings_bytes": findings_identity[1],
+            }
+        )
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256,
+        input_identity[0],
+        file_identity(audit)[0],
+    )
+    return normalization_manifest, audit
 
 
 def _split_sample(identifier: str, repository: str) -> NormalizedSample:
@@ -283,7 +377,10 @@ sources:
     assert len(payload["rejection_ledger_sha256"]) == 64
 
 
-def test_pilot_command_validates_and_writes_normalized_samples(tmp_path: Path) -> None:
+def test_pilot_command_validates_and_writes_normalized_samples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sample = NormalizedSample(
         source_dataset="fixture",
         source_dataset_revision="a" * 40,
@@ -303,6 +400,12 @@ def test_pilot_command_validates_and_writes_normalized_samples(tmp_path: Path) -
     )
     input_path = tmp_path / "normalized.jsonl"
     input_path.write_text(sample.model_dump_json() + "\n", encoding="utf-8")
+    input_identity = file_identity(input_path)
+    normalization_manifest, gold_audit = _write_pilot_safety_evidence(
+        tmp_path,
+        input_path,
+        monkeypatch,
+    )
     split_manifest = tmp_path / "split.json"
     split_manifest.write_text(
         json.dumps(
@@ -312,9 +415,17 @@ def test_pilot_command_validates_and_writes_normalized_samples(tmp_path: Path) -
                     "train": ["github.com/acme/widget"],
                     "evaluation": [],
                 },
+                "input_sha256": input_identity[0],
+                "input_bytes": input_identity[1],
+                "sample_count": 1,
             }
         ),
         encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256,
+        input_identity[0],
+        file_identity(split_manifest)[0],
     )
     registry = tmp_path / "registry.yaml"
     registry.write_text(
@@ -341,6 +452,10 @@ def test_pilot_command_validates_and_writes_normalized_samples(tmp_path: Path) -
             str(input_path),
             "--output",
             str(output),
+            "--normalization-manifest",
+            str(normalization_manifest),
+            "--gold-exposure-audit",
+            str(gold_audit),
             "--split-manifest",
             str(split_manifest),
             "--registry",
@@ -362,8 +477,87 @@ def test_pilot_command_validates_and_writes_normalized_samples(tmp_path: Path) -
             "policy_sha256",
             "registry_sha256",
             "split_manifest_sha256",
+            "normalization_manifest_sha256",
+            "gold_exposure_audit_sha256",
         )
     )
+    assert payload["gold_exposure_audit"] == "PASS"
+
+
+def test_pilot_rechecks_training_surface_despite_authorized_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = NormalizedSample(
+        source_dataset="open-swe-traces",
+        source_dataset_revision="ed95cef24df8d8bd79b4ceb0192cb420fde06521",
+        repository="acme/widget",
+        repository_license="MIT",
+        base_commit="b" * 40,
+        issue_or_pr_id="one",
+        language="TypeScript",
+        harness="fixture",
+        generating_model="fixture@revision",
+        rollout_id="rollout-one",
+        resolved=True,
+        trajectory=({"reference": {"patch": "SECRET_GOLD"}},),
+        generated_patch="diff --git a/a.ts b/a.ts",
+        patch_metadata={"bytes": 1},
+        provenance_lineage=("raw:one",),
+    )
+    input_path = tmp_path / "normalized.jsonl"
+    input_path.write_text(sample.model_dump_json() + "\n", encoding="utf-8")
+    input_identity = file_identity(input_path)
+    normalization_manifest, gold_audit = _write_pilot_safety_evidence(
+        tmp_path,
+        input_path,
+        monkeypatch,
+        source_name="open-swe-traces",
+        source_revision="ed95cef24df8d8bd79b4ceb0192cb420fde06521",
+    )
+    split_manifest = tmp_path / "split.json"
+    split_manifest.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.repository-split/v1",
+                "repositories": {
+                    "train": ["github.com/acme/widget"],
+                    "evaluation": [],
+                },
+                "input_sha256": input_identity[0],
+                "input_bytes": input_identity[1],
+                "sample_count": 1,
+            }
+        )
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256,
+        input_identity[0],
+        file_identity(split_manifest)[0],
+    )
+    output = tmp_path / "pilot.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "build-pilot",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output),
+            "--normalization-manifest",
+            str(normalization_manifest),
+            "--gold-exposure-audit",
+            str(gold_audit),
+            "--split-manifest",
+            str(split_manifest),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "forbidden gold/reference patch" in result.output
+    assert not output.exists()
 
 
 def test_large_download_requires_explicit_confirmation(tmp_path: Path) -> None:
@@ -576,7 +770,7 @@ def test_real_training_lifecycle_blocks_before_importing_a_model_without_pins(
 
 def test_training_lifecycle_command_requires_model_authored_patch_evidence(
     tmp_path: Path,
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeBackend:
         def __init__(self, settings: object) -> None:
@@ -706,10 +900,19 @@ def test_training_lifecycle_command_requires_model_authored_patch_evidence(
                 "accepted_count": 1,
                 "samples_artifact": samples.name,
                 "samples_sha256": samples_sha256,
+                "samples_bytes": samples.stat().st_size,
+                "gold_exposure_audit": "PASS",
+                "normalization_manifest_sha256": "d" * 64,
+                "gold_exposure_audit_sha256": "e" * 64,
             }
         )
         + "\n",
         encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_PILOT_MANIFEST_SHA256_BY_SAMPLES_SHA256,
+        samples_sha256,
+        file_identity(pilot_manifest)[0],
     )
     report = tmp_path / "report.json"
 
@@ -742,6 +945,77 @@ def test_training_lifecycle_command_requires_model_authored_patch_evidence(
     assert payload["checkpoint_resume_required"] is True
     assert payload["measurements"]["resumed_optimizer_steps"] == 1
     assert payload["fixture_evaluation"]["status"] == "PASS"
+    assert payload["evaluation_fixture_sha256"] == MODEL_TASK_FIXTURE_IDENTITY.tree_sha256
+    assert payload["evaluation_fixture_file_count"] == MODEL_TASK_FIXTURE_IDENTITY.file_count
+
+    altered_fixture = tmp_path / "altered-fixture"
+    shutil.copytree(Path("tests/fixtures/model-task"), altered_fixture)
+    (altered_fixture / "test" / "math.test.js").write_text(
+        "import test from 'node:test';\ntest('untrusted', () => {});\n",
+        encoding="utf-8",
+    )
+    altered_result = CliRunner().invoke(
+        app,
+        [
+            "training",
+            "run-lifecycle",
+            "--config",
+            str(config),
+            "--samples",
+            str(samples),
+            "--pilot-manifest",
+            str(pilot_manifest),
+            "--checkpoint-dir",
+            str(tmp_path / "altered-checkpoint"),
+            "--evaluation-workspace",
+            str(altered_fixture),
+            "--output",
+            str(tmp_path / "altered-report.json"),
+            "--sandbox-image",
+            f"docker.io/library/node@sha256:{'d' * 64}",
+            "--json",
+        ],
+    )
+
+    assert altered_result.exit_code == 2
+    assert "evaluation fixture" in altered_result.output
+    assert not (tmp_path / "altered-checkpoint").exists()
+
+    original_writer = cli_module.write_immutable_json
+
+    def mutate_on_publish(path, value, *, before_publish=None):
+        def mutate_then_verify() -> object:
+            samples.write_bytes(samples.read_bytes() + b" ")
+            return before_publish() if before_publish is not None else None
+
+        return original_writer(path, value, before_publish=mutate_then_verify)
+
+    monkeypatch.setattr(cli_module, "write_immutable_json", mutate_on_publish)
+    changed_report = tmp_path / "changed-report.json"
+    changed_result = CliRunner().invoke(
+        app,
+        [
+            "training",
+            "run-lifecycle",
+            "--config",
+            str(config),
+            "--samples",
+            str(samples),
+            "--pilot-manifest",
+            str(pilot_manifest),
+            "--checkpoint-dir",
+            str(tmp_path / "changed-checkpoint"),
+            "--output",
+            str(changed_report),
+            "--sandbox-image",
+            f"docker.io/library/node@sha256:{'d' * 64}",
+            "--json",
+        ],
+    )
+
+    assert changed_result.exit_code == 2
+    assert "input changed while it was being processed" in changed_result.output
+    assert not changed_report.exists()
 
 
 def test_infrastructure_doctor_emits_machine_readable_report(tmp_path: Path) -> None:
@@ -776,18 +1050,35 @@ def test_harness_rejects_a_successful_node_run_with_zero_tests(tmp_path: Path) -
     assert "without evidence" in payload["reason"]
 
 
-def test_invalid_normalized_pilot_input_is_actionable(tmp_path: Path) -> None:
+def test_invalid_normalized_pilot_input_is_actionable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     input_path = tmp_path / "bad.jsonl"
     input_path.write_text('{"repository":"acme/widget"}\n', encoding="utf-8")
+    input_identity = file_identity(input_path)
+    normalization_manifest, gold_audit = _write_pilot_safety_evidence(
+        tmp_path,
+        input_path,
+        monkeypatch,
+    )
     split_manifest = tmp_path / "split.json"
     split_manifest.write_text(
         json.dumps(
             {
                 "schema_version": "nodelm.repository-split/v1",
                 "repositories": {"train": [], "evaluation": []},
+                "input_sha256": input_identity[0],
+                "input_bytes": input_identity[1],
+                "sample_count": 1,
             }
         ),
         encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256,
+        input_identity[0],
+        file_identity(split_manifest)[0],
     )
 
     result = CliRunner().invoke(
@@ -799,13 +1090,17 @@ def test_invalid_normalized_pilot_input_is_actionable(tmp_path: Path) -> None:
             str(input_path),
             "--output",
             str(tmp_path / "pilot.json"),
+            "--normalization-manifest",
+            str(normalization_manifest),
+            "--gold-exposure-audit",
+            str(gold_audit),
             "--split-manifest",
             str(split_manifest),
         ],
     )
 
     assert result.exit_code == 2
-    assert "invalid normalized sample" in result.output
+    assert "invalid normalized pilot input" in result.output
 
 
 def test_dataset_registry_validate_preserves_explicit_fail(tmp_path: Path) -> None:

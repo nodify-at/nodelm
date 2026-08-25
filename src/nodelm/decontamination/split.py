@@ -33,6 +33,30 @@ from nodelm.decontamination.contamination import (
 from nodelm.decontamination.fingerprints import canonical_repository
 from nodelm.models import stable_model_id
 
+
+class SplitAuthorizationError(ValueError):
+    """A repository split is not part of the reviewed data trust root."""
+
+
+AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256: dict[str, str] = {}
+
+
+def require_authorized_repository_split(
+    *,
+    normalized_sha256: str,
+    split_sha256: str,
+) -> None:
+    expected = AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256.get(normalized_sha256)
+    if expected is None:
+        raise SplitAuthorizationError(
+            "no reviewed repository split is authorized for this normalized artifact"
+        )
+    if split_sha256 != expected:
+        raise SplitAuthorizationError(
+            "repository split digest is not authorized for this normalized artifact"
+        )
+
+
 SplitName = Literal["train", "evaluation", "excluded"]
 
 
@@ -159,9 +183,17 @@ def _read_repository_mapping(
     return repositories
 
 
-def read_repository_split_repositories(
-    path: Path,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+@dataclass(frozen=True)
+class RepositorySplitEvidence:
+    train: tuple[str, ...]
+    evaluation: tuple[str, ...]
+    excluded: tuple[str, ...]
+    input_sha256: str | None
+    input_bytes: int | None
+    sample_count: int | None
+
+
+def read_repository_split_evidence(path: Path) -> RepositorySplitEvidence:
     """Stream a split manifest and retain only its repository-level partition.
 
     PyYAML's event API validates and traverses the complete JSON/YAML document lazily, so
@@ -170,6 +202,9 @@ def read_repository_split_repositories(
 
     schema_version: str | None = None
     repository_mapping: dict[SplitName, list[str]] | None = None
+    input_sha256: str | None = None
+    input_bytes: int | None = None
+    sample_count: int | None = None
     try:
         with path.open(encoding="utf-8") as source:
             events = iter(yaml.parse(source, Loader=yaml.SafeLoader))
@@ -198,6 +233,23 @@ def read_repository_split_repositories(
                     schema_version = value_event.value
                 elif key == "repositories":
                     repository_mapping = _read_repository_mapping(value_event, events)
+                elif key == "input_sha256":
+                    if not isinstance(value_event, ScalarEvent):
+                        raise ValueError("split manifest input_sha256 must be a string")
+                    input_sha256 = value_event.value
+                elif key in {"input_bytes", "sample_count"}:
+                    if not isinstance(value_event, ScalarEvent):
+                        raise ValueError(f"split manifest {key} must be an integer")
+                    try:
+                        parsed_integer = int(value_event.value)
+                    except ValueError as error:
+                        raise ValueError(f"split manifest {key} must be an integer") from error
+                    if parsed_integer < 0:
+                        raise ValueError(f"split manifest {key} must be non-negative")
+                    if key == "input_bytes":
+                        input_bytes = parsed_integer
+                    else:
+                        sample_count = parsed_integer
                 else:
                     _skip_yaml_value(value_event, events)
 
@@ -229,7 +281,21 @@ def read_repository_split_repositories(
         or set(evaluation) & set(excluded)
     ):
         raise ValueError("split manifest repository lists overlap")
-    return train, evaluation
+    return RepositorySplitEvidence(
+        train=train,
+        evaluation=evaluation,
+        excluded=excluded,
+        input_sha256=input_sha256,
+        input_bytes=input_bytes,
+        sample_count=sample_count,
+    )
+
+
+def read_repository_split_repositories(
+    path: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    evidence = read_repository_split_evidence(path)
+    return evidence.train, evidence.evaluation
 
 
 def build_repository_split(

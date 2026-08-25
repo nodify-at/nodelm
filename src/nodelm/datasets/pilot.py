@@ -13,6 +13,29 @@ from nodelm.licenses.gate import LicenseDisposition, evaluate_license
 from nodelm.models import NormalizedSample, VerificationStatus, stable_model_id
 
 
+class PilotAuthorizationError(ValueError):
+    """A pilot manifest is not part of the reviewed training trust root."""
+
+
+AUTHORIZED_PILOT_MANIFEST_SHA256_BY_SAMPLES_SHA256: dict[str, str] = {}
+
+
+def require_authorized_pilot_manifest(
+    *,
+    samples_sha256: str,
+    pilot_manifest_sha256: str,
+) -> None:
+    expected = AUTHORIZED_PILOT_MANIFEST_SHA256_BY_SAMPLES_SHA256.get(samples_sha256)
+    if expected is None:
+        raise PilotAuthorizationError(
+            "no reviewed pilot manifest is authorized for this samples artifact"
+        )
+    if pilot_manifest_sha256 != expected:
+        raise PilotAuthorizationError(
+            "pilot manifest digest is not authorized for this samples artifact"
+        )
+
+
 class PilotPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

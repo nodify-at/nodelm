@@ -23,8 +23,10 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
 - Accept model output only as a bounded, text-only Git patch. Reject protected paths when any
   path component is a symlink.
 - Bind protected smoke evaluation to the exact expected `SolveContext` and approved before/after
-  source hashes. Never promote a generic repository-test exit to `PASS`; without an
-  integrity-attested oracle it remains `UNVERIFIED`.
+  source hashes. Require the complete code-pinned regular-file fixture identity, evaluate only a
+  private verified copy, and bind that tree digest into the terminal report. Never promote a
+  generic repository-test exit to `PASS`; without an integrity-attested oracle it remains
+  `UNVERIFIED`.
 - Never commit credentials, raw private keys, generated datasets, model weights, checkpoints,
   or measured artifacts that contain sensitive source data.
 - All three pinned dataset snapshots and their receipt-bound core audits and lineage are complete
@@ -44,6 +46,29 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   logical rows, report, and complete rejection ledger; revalidate once at each immutable
   publication boundary and publish lineage last. Treat the private stage as same-account process
   isolation, not as a security sandbox against a hostile process running under the same OS user.
+- Keep the receipt-bound dataset registry byte-for-byte stable until a deliberate re-attestation
+  migration exists. Open-SWE materialization must use the separate digest-bound 11-leaf
+  partition contract, a complete transfer receipt, and one partition per artifact. Derive
+  harness, source-native model label, and task family from the contract; never relabel a batch
+  from free text.
+- Open-SWE normalization requires a v2 partition materialization, a complete license-safe task
+  provenance projection, both code-authorized transfer-receipt seals, both raw snapshot roots,
+  and a required matching task join. Replay materialization and task projection from private
+  identity-verified staging before accepting either derived manifest. The safe
+  task artifact may contain only repository, base commit, license, language, instance ID, and
+  task-source identity. Poison the complete task identity if any duplicate row is unsafe or
+  conflicting, while retaining its original rejection cause. Treat `resolved=-1`/null as
+  `unknown_resolution`, not false. Scale-SWE and V2-PR task joins remain `BLOCKED` until their
+  missing provenance is verified.
+- Scope rollout uniqueness to the exact partition leaf and use a disk-backed index. Admit one
+  copy of an exact duplicate, reject every row in a conflicting rollout group, and never collapse
+  distinct rollout IDs. Every normalized sample includes its raw-row digest in lineage.
+- Never build or train from a normalized JSONL alone. Pilot construction requires its replay-
+  verified normalization manifest, a reviewed split digest authorized for the same bytes and row
+  count, and a reviewed, code-authorized `PASS` gold-exposure audit with complete oracle-isolation
+  coverage. Build the split from private identity-verified copies of every input. The one-step
+  training lifecycle requires the exact reviewed pilot digest authorized for its samples, reads
+  both through private staging, and rechecks every referenced input at report publication.
 - Keep the project hardware-agnostic. Hardware-specific configuration belongs under
   `configs/infra/`, not in core dataset or harness logic.
 

@@ -1,0 +1,115 @@
+schema_version: nodelm.trace-partition-contract/v1
+source_name: open-swe-traces
+source_repository_id: nvidia/Open-SWE-Traces
+source_revision: ed95cef24df8d8bd79b4ceb0192cb420fde06521
+sealed_registry_sha256: f92315a70a0c75ec909d83f4cb639b3a320f62526069f11ca87f0fe1d891637f
+transfer_receipt_sha256: 44ea157ebd802a5604301c82e8785003d67f90d0ed64efcc079059dfd4290a84
+snapshot_sha256: 218df319b86b21be12f22284e25cdbaf90e77fdbc3e2d996c152ec8c54c03aa3
+snapshot_file_count: 231
+partitions:
+  - name: minisweagent/qwen36_27b/scale-swe
+    harness: minisweagent
+    generating_model: source-label:qwen36_27b
+    upstream_source: scale-swe
+    row_dataset_name: AweAI-Team/Scale-SWE
+    normalization_status: BLOCKED
+    file_patterns:
+      - data/minisweagent/qwen36_27b/scale-swe/*.parquet
+    notes: Pinned task provenance for Scale-SWE has not been established.
+  - name: minisweagent/qwen36_27b/swe-rebench-v2
+    harness: minisweagent
+    generating_model: source-label:qwen36_27b
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/minisweagent/qwen36_27b/swe-rebench-v2/*.parquet
+  - name: openhands/deepseek-v4-flash/scale-swe
+    harness: openhands
+    generating_model: source-label:deepseek-v4-flash
+    upstream_source: scale-swe
+    row_dataset_name: AweAI-Team/Scale-SWE
+    normalization_status: BLOCKED
+    file_patterns:
+      - data/openhands/deepseek-v4-flash/scale-swe/*.parquet
+    notes: Pinned task provenance for Scale-SWE has not been established.
+  - name: openhands/minimax_m25/swe-rebench-v2
+    harness: openhands
+    generating_model: source-label:minimax_m25
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/openhands/minimax_m25/swe-rebench-v2/*.parquet
+  - name: openhands/qwen35_122b/swe-rebench-v2
+    harness: openhands
+    generating_model: source-label:qwen35_122b
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/openhands/qwen35_122b/swe-rebench-v2/*.parquet
+  - name: openhands/qwen36_27b/scale-swe
+    harness: openhands
+    generating_model: source-label:qwen36_27b
+    upstream_source: scale-swe
+    row_dataset_name: AweAI-Team/Scale-SWE
+    normalization_status: BLOCKED
+    file_patterns:
+      - data/openhands/qwen36_27b/scale-swe/*.parquet
+    notes: Pinned task provenance for Scale-SWE has not been established.
+  - name: openhands/qwen36_27b/swe-rebench-v2
+    harness: openhands
+    generating_model: source-label:qwen36_27b
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/openhands/qwen36_27b/swe-rebench-v2/*.parquet
+  - name: sweagent/minimax_m25/swe-rebench-v2
+    harness: sweagent
+    generating_model: source-label:minimax_m25
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/sweagent/minimax_m25/swe-rebench-v2/*.parquet
+  - name: sweagent/qwen35_122b/swe-rebench-v2
+    harness: sweagent
+    generating_model: source-label:qwen35_122b
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/sweagent/qwen35_122b/swe-rebench-v2/*.parquet
+  - name: sweagent/qwen36_27b/scale-swe
+    harness: sweagent
+    generating_model: source-label:qwen36_27b
+    upstream_source: scale-swe
+    row_dataset_name: AweAI-Team/Scale-SWE
+    normalization_status: BLOCKED
+    file_patterns:
+      - data/sweagent/qwen36_27b/scale-swe/*.parquet
+    notes: Pinned task provenance for Scale-SWE has not been established.
+  - name: sweagent/qwen36_27b/swe-rebench-v2
+    harness: sweagent
+    generating_model: source-label:qwen36_27b
+    upstream_source: swe-rebench-v2
+    row_dataset_name: nebius/SWE-rebench-V2
+    normalization_status: PASS
+    task_source_name: swe-rebench-v2
+    task_source_revision: 475dd5e8703bb5fb22dd3c60b5d038b019eba1e0
+    file_patterns:
+      - data/sweagent/qwen36_27b/swe-rebench-v2/*.parquet

@@ -15,10 +15,17 @@ Official metadata APIs: [Open-SWE](https://huggingface.co/api/datasets/nvidia/Op
 
 ## Verified discrepancies
 
-- Open-SWE's live viewer totals 567,824 rows across eight splits, while its README still shows
-  an older 207,489 total. Live pinned snapshot counts are authoritative.
-- Recent Open-SWE rows add `hf_dataset_name` and include Scale-SWE-derived data, so the card's
-  source description is incomplete. Exact composition remains `UNVERIFIED`.
+- Open-SWE's pinned snapshot contains 567,824 rows and 231 Parquet files across 11 leaf
+  `(harness, generating-model label, upstream task source)` partitions, while its README still
+  shows an older 207,489 total. The checked-in partition contract binds the exact receipt
+  inventory; paper/card counts are not substituted.
+- Recent Open-SWE rows add `hf_dataset_name`. Seven leaves identify
+  `nebius/SWE-rebench-V2`; four identify `AweAI-Team/Scale-SWE`. Only the seven Rebench-backed
+  leaves have a pinned task-source join today.
+- The sealed registry spells one historical descriptive split as `deepseek_v4_flash`, while the
+  receipt-bound snapshot path is `deepseek-v4-flash`. The registry bytes are preserved because
+  every transfer receipt binds them; `configs/datasets/open-swe-trace-partitions.yaml` records
+  the observed path separately.
 - SWE-rebench-V2 and V2-PRs expose `created_at` as a string although prose describes an
   integer. Parsers follow the observed pinned schema.
 - V2-PRs has no top-level language field and its nested metadata is irregular. Language must

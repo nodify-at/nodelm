@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from nodelm.models import DatasetSource, VerificationStatus
-from nodelm.provenance.normalize import NormalizationError
-from nodelm.provenance.pipeline import normalize_trace_sample, task_metadata_index
+from nodelm.models import DatasetSource, VerificationStatus, stable_model_id
+from nodelm.provenance.normalize import NormalizationError, UnknownResolutionError
+from nodelm.provenance.pipeline import (
+    normalize_trace_sample,
+    task_metadata_index,
+    trace_rollout_key,
+)
 
 
 def _source() -> DatasetSource:
@@ -157,4 +161,179 @@ def test_trace_normalization_rejects_repository_alias_conflict() -> None:
             harness="sweagent",
             generating_model="source-config:model",
             task_lookup=lookup,
+        )
+
+
+def test_trace_normalization_requires_a_matching_safe_task_projection() -> None:
+    trace = {
+        "hf_dataset_name": "nebius/SWE-rebench-V2",
+        "instance_id": "missing",
+        "repo": "acme/widget",
+        "trajectory_id": "rollout-1",
+        "resolved": 1,
+        "trajectory": [{"role": "assistant", "content": "inspect"}],
+    }
+
+    with (
+        task_metadata_index(()) as lookup,
+        pytest.raises(NormalizationError, match="missing required task provenance"),
+    ):
+        normalize_trace_sample(
+            trace,
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
+            task_lookup=lookup,
+            require_task_match=True,
+            expected_row_dataset_name="nebius/SWE-rebench-V2",
+        )
+
+
+def test_trace_normalization_canonicalizes_license_and_language_aliases() -> None:
+    task = {
+        "instance_id": "acme__widget-1",
+        "repository": "Acme/Widget",
+        "base_commit": "B" * 40,
+        "repository_license": "MIT",
+        "language": "TypeScript",
+    }
+    trace = {
+        "hf_dataset_name": "nebius/SWE-rebench-V2",
+        "instance_id": "acme__widget-1",
+        "repo": "https://github.com/acme/widget.git",
+        "base_commit": "b" * 40,
+        "license": "mit license",
+        "language": "ts",
+        "trajectory_id": "rollout-1",
+        "resolved": 1,
+        "trajectory": [{"role": "assistant", "content": "inspect"}],
+    }
+
+    with task_metadata_index((task,)) as lookup:
+        sample = normalize_trace_sample(
+            trace,
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
+            task_lookup=lookup,
+            require_task_match=True,
+            expected_row_dataset_name="nebius/SWE-rebench-V2",
+            extra_lineage=("materialization:a", "trace-partition:harness/model/tasks"),
+        )
+
+    assert sample.repository_license == "MIT"
+    assert sample.language == "TypeScript"
+    assert sample.base_commit == "B" * 40
+    assert sample.provenance_lineage[-2:] == (
+        "materialization:a",
+        "trace-partition:harness/model/tasks",
+    )
+    assert f"raw-row:{stable_model_id(trace)}" in sample.provenance_lineage
+
+
+def test_raw_row_lineage_binds_fields_omitted_from_normalized_content() -> None:
+    task = {
+        "instance_id": "acme__widget-1",
+        "repository": "Acme/Widget",
+        "base_commit": "b" * 40,
+        "repository_license": "MIT",
+        "language": "TypeScript",
+    }
+    trace = {
+        "hf_dataset_name": "nebius/SWE-rebench-V2",
+        "instance_id": "acme__widget-1",
+        "trajectory_id": "rollout-1",
+        "resolved": 1,
+        "tools": ["first-omitted-tool"],
+    }
+
+    with task_metadata_index((task,)) as lookup:
+        first = normalize_trace_sample(
+            trace,
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
+            task_lookup=lookup,
+            require_task_match=True,
+            expected_row_dataset_name="nebius/SWE-rebench-V2",
+        )
+        second = normalize_trace_sample(
+            {**trace, "tools": ["second-omitted-tool"]},
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
+            task_lookup=lookup,
+            require_task_match=True,
+            expected_row_dataset_name="nebius/SWE-rebench-V2",
+        )
+
+    assert first.sample_id != second.sample_id
+
+
+def test_trace_rollout_key_is_scoped_to_exact_partition_leaf() -> None:
+    task = {
+        "instance_id": "acme__widget-1",
+        "repository": "Acme/Widget",
+        "base_commit": "b" * 40,
+        "repository_license": "MIT",
+        "language": "TypeScript",
+    }
+    trace = {
+        "hf_dataset_name": "nebius/SWE-rebench-V2",
+        "instance_id": "acme__widget-1",
+        "trajectory_id": "rollout-1",
+        "resolved": -1,
+    }
+
+    with task_metadata_index((task,)) as lookup:
+        first = trace_rollout_key(
+            trace,
+            source=_source(),
+            partition_name="openhands/model/swe-rebench-v2",
+            row_dataset_name="nebius/SWE-rebench-V2",
+            task_lookup=lookup,
+        )
+        second = trace_rollout_key(
+            {**trace, "hf_dataset_name": "AweAI-Team/Scale-SWE"},
+            source=_source(),
+            partition_name="openhands/model/scale-swe",
+            row_dataset_name="AweAI-Team/Scale-SWE",
+            task_lookup=lookup,
+        )
+
+    assert first != second
+
+
+def test_trace_normalization_rejects_wrong_row_task_family() -> None:
+    with pytest.raises(NormalizationError, match="hf_dataset_name"):
+        normalize_trace_sample(
+            {
+                "hf_dataset_name": "AweAI-Team/Scale-SWE",
+                "instance_id": "one",
+            },
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
+            expected_row_dataset_name="nebius/SWE-rebench-V2",
+        )
+
+
+@pytest.mark.parametrize("resolved", (-1, None))
+def test_trace_normalization_rejects_unknown_resolution_explicitly(
+    resolved: object,
+) -> None:
+    with pytest.raises(UnknownResolutionError):
+        normalize_trace_sample(
+            {
+                "instance_id": "one",
+                "repo": "acme/widget",
+                "base_commit": "b" * 40,
+                "license": "MIT",
+                "language": "TypeScript",
+                "trajectory_id": "rollout-one",
+                "resolved": resolved,
+            },
+            source=_source(),
+            harness="sweagent",
+            generating_model="source-label:model",
         )

@@ -9,11 +9,57 @@ from pathlib import Path
 from typing import Any
 
 from nodelm.decontamination.fingerprints import canonical_repository
-from nodelm.models import DatasetSource, NormalizedSample, VerificationStatus
-from nodelm.provenance.normalize import NormalizationError, normalize_sample
+from nodelm.licenses.gate import LicenseDisposition, evaluate_license
+from nodelm.models import DatasetSource, NormalizedSample, VerificationStatus, stable_model_id
+from nodelm.provenance.normalize import (
+    NormalizationError,
+    UnknownResolutionError,
+    normalize_sample,
+    parse_resolution_status,
+)
+from nodelm.provenance.task_provenance import TaskProjectionError, canonical_language
 
 TaskMetadata = dict[str, str]
 TaskMetadataLookup = Callable[[str], TaskMetadata | None]
+
+
+def trace_rollout_key(
+    row: Mapping[str, Any],
+    *,
+    source: DatasetSource,
+    partition_name: str,
+    row_dataset_name: str,
+    task_lookup: TaskMetadataLookup,
+) -> str:
+    """Build a leaf-scoped rollout identity before resolution-dependent normalization."""
+
+    if _optional_string(row, "hf_dataset_name") != row_dataset_name:
+        raise NormalizationError(
+            "trace hf_dataset_name does not match the bound partition task family"
+        )
+    instance_id = _required_identifier(row, "instance_id")
+    rollout_id = _required_one_of_string(row, "trajectory_id", "rollout_id")
+    task = task_lookup(instance_id)
+    if task is None:
+        raise NormalizationError(f"missing required task provenance for {instance_id}")
+    try:
+        repository = canonical_repository(task["repo"])
+    except (KeyError, ValueError) as error:
+        raise NormalizationError(
+            f"invalid task repository for rollout identity {instance_id}: {error}"
+        ) from error
+    return stable_model_id(
+        {
+            "schema_version": "nodelm.trace-rollout-key/v1",
+            "source_dataset": source.name,
+            "source_dataset_revision": source.revision,
+            "partition_name": partition_name,
+            "row_dataset_name": row_dataset_name,
+            "repository": repository,
+            "instance_id": instance_id,
+            "rollout_id": rollout_id,
+        }
+    )
 
 
 def _required_string(row: Mapping[str, Any], field: str) -> str:
@@ -21,6 +67,28 @@ def _required_string(row: Mapping[str, Any], field: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     raise NormalizationError(f"task metadata requires string {field}")
+
+
+def _required_one_of_string(row: Mapping[str, Any], *fields: str) -> str:
+    for field in fields:
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise NormalizationError(f"task metadata requires string {' or '.join(fields)}")
+
+
+def _canonical_license(value: str) -> str:
+    decision = evaluate_license(value)
+    if decision.disposition is not LicenseDisposition.ALLOW or decision.normalized_spdx is None:
+        raise NormalizationError(f"task metadata license is not allowed: {value!r}")
+    return decision.normalized_spdx
+
+
+def _canonical_language(value: str) -> str:
+    try:
+        return canonical_language(value)
+    except TaskProjectionError as error:
+        raise NormalizationError(str(error)) from error
 
 
 def _required_identifier(row: Mapping[str, Any], field: str) -> str:
@@ -46,7 +114,12 @@ def _first_optional_string(row: Mapping[str, Any], *fields: str) -> str | None:
 
 
 @contextmanager
-def task_metadata_index(rows: Iterable[Mapping[str, Any]]) -> Iterator[TaskMetadataLookup]:
+def task_metadata_index(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    expected_source_name: str | None = None,
+    expected_source_revision: str | None = None,
+) -> Iterator[TaskMetadataLookup]:
     """Index only provenance-safe join fields from task rows on disk.
 
     Gold patches and problem statements are deliberately never stored in the join index.
@@ -67,12 +140,21 @@ def task_metadata_index(rows: Iterable[Mapping[str, Any]]) -> Iterator[TaskMetad
             "repository_license TEXT NOT NULL, language TEXT NOT NULL) WITHOUT ROWID"
         )
         for row in rows:
+            if expected_source_name is not None and (
+                _required_string(row, "source_dataset") != expected_source_name
+            ):
+                raise NormalizationError("task provenance source_dataset mismatch")
+            if expected_source_revision is not None and (
+                _required_string(row, "source_dataset_revision").casefold()
+                != expected_source_revision.casefold()
+            ):
+                raise NormalizationError("task provenance source revision mismatch")
             values = (
                 _required_identifier(row, "instance_id"),
-                _required_string(row, "repo"),
+                _required_one_of_string(row, "repo", "repository"),
                 _required_string(row, "base_commit"),
-                _required_string(row, "license"),
-                _required_string(row, "language"),
+                _canonical_license(_required_one_of_string(row, "license", "repository_license")),
+                _canonical_language(_required_string(row, "language")),
             )
             existing = connection.execute(
                 "SELECT repository, base_commit, repository_license, language "
@@ -120,6 +202,9 @@ def normalize_trace_sample(
     harness: str,
     generating_model: str,
     task_lookup: TaskMetadataLookup | None = None,
+    require_task_match: bool = False,
+    expected_row_dataset_name: str | None = None,
+    extra_lineage: tuple[str, ...] = (),
 ) -> NormalizedSample:
     """Normalize one generated trace without allowing task gold-patch fields to cross over."""
 
@@ -127,9 +212,23 @@ def normalize_trace_sample(
         raise NormalizationError("trace normalization requires a registry-verified source")
     if not harness.strip() or not generating_model.strip():
         raise NormalizationError("harness and generating_model must be non-empty")
+    if any(not item.strip() for item in extra_lineage):
+        raise NormalizationError("extra lineage entries must be non-empty")
+    if expected_row_dataset_name is not None:
+        observed_row_dataset = _optional_string(row, "hf_dataset_name")
+        if observed_row_dataset != expected_row_dataset_name:
+            raise NormalizationError(
+                "trace hf_dataset_name does not match the bound partition task family"
+            )
 
     instance_id = _required_identifier(row, "instance_id")
     merged = dict(row)
+    resolution = parse_resolution_status(row.get("resolved"))
+    if resolution is None:
+        raise UnknownResolutionError(
+            "resolved is unknown; normalized-sample/v1 requires boolean evidence"
+        )
+    merged["resolved"] = resolution
     metadata = row.get("metadata")
     if isinstance(metadata, Mapping):
         for field in ("base_commit", "license", "language"):
@@ -139,6 +238,8 @@ def normalize_trace_sample(
                     merged[field] = nested
 
     task = task_lookup(instance_id) if task_lookup is not None else None
+    if require_task_match and task is None:
+        raise NormalizationError(f"missing required task provenance for {instance_id}")
     if task is not None:
         joined_fields = (
             ("repo", ("repo", "repository"), "repository"),
@@ -161,17 +262,26 @@ def normalize_trace_sample(
                     raise NormalizationError(
                         f"invalid trace/task repository for {instance_id}: {error}"
                     ) from error
-            else:
+            elif task_field == "base_commit":
+                values_match = trace_value.casefold() == task_value.casefold()
+            elif task_field == "license":
+                values_match = _canonical_license(trace_value) == task_value
+            elif task_field == "language":
+                values_match = _canonical_language(trace_value) == task_value
+            else:  # pragma: no cover - joined_fields is closed above
                 values_match = trace_value == task_value
             if not values_match:
                 raise NormalizationError(f"trace/task {label} mismatch for {instance_id}")
+            merged[task_field] = task_value
 
     lineage = [
         f"hf-dataset:{source.repository_id}@{source.revision}",
         f"instance:{instance_id}",
+        f"raw-row:{stable_model_id(row)}",
     ]
     if task is not None:
         lineage.append(f"task-metadata:{instance_id}")
+    lineage.extend(item.strip() for item in extra_lineage)
     return normalize_sample(
         merged,
         source_dataset=source.name,

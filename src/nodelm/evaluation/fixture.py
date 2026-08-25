@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from nodelm.datasets.staging import RegularFileIdentity, regular_file_tree_identity
 from nodelm.evaluation.sandbox import FixtureSandbox, SandboxUnavailableError
 from nodelm.harness import CommandExecutor, CommandPolicy, OutcomeCategory, parse_node_test_count
 from nodelm.harness.patches import validate_text_git_patch
@@ -41,6 +42,31 @@ MODEL_TASK_EXACT_SOURCE_TRANSITIONS = (
         before_sha256="c3df0312d1ff6f17ef20ce799fe706e2ed138326c81f3ee4a85a4df80e13e079",
         after_sha256="a08f7a62ed3600268595fd20d7e9e506d299d7d48ee51c092b52d7560b547670",
     ),
+)
+
+MODEL_TASK_FIXTURE_IDENTITY = regular_file_tree_identity(
+    (
+        RegularFileIdentity(
+            path="package.json",
+            sha256="40fc837ade558c6d989356feafcd6d4e5916582e1f5a77d7badddb8fda6c3f48",
+            bytes=145,
+        ),
+        RegularFileIdentity(
+            path="src/math.js",
+            sha256="c3df0312d1ff6f17ef20ce799fe706e2ed138326c81f3ee4a85a4df80e13e079",
+            bytes=195,
+        ),
+        RegularFileIdentity(
+            path="test/math.test.js",
+            sha256="94f45561116f330d67a965551e78710af3f41b9e2ffc33b5b445695bafb2c922",
+            bytes=1755,
+        ),
+        RegularFileIdentity(
+            path="tsconfig.json",
+            sha256="49995fe59ef45d2fe885cfe2e04643f0bbb324237c40e3e4a011ab1bc45b078d",
+            bytes=220,
+        ),
+    )
 )
 
 

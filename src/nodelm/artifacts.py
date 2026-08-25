@@ -112,6 +112,15 @@ def write_immutable_stream(
     return ArtifactWriteResult(path=path, digest=digest, created=created)
 
 
-def write_immutable_json(path: Path, value: Any) -> ArtifactWriteResult:
+def write_immutable_json(
+    path: Path,
+    value: Any,
+    *,
+    before_publish: Callable[[], object] | None = None,
+) -> ArtifactWriteResult:
     data = canonical_json_bytes(value)
-    return write_immutable_stream(path, lambda stream: stream.write(data))
+    return write_immutable_stream(
+        path,
+        lambda stream: stream.write(data),
+        before_publish=before_publish,
+    )
