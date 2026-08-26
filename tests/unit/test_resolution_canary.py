@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 from typing import Literal
 
@@ -598,8 +599,13 @@ def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
     yarn.mkdir(parents=True)
     (corepack / "lastKnownGood.json").write_text('{"yarn":"1.22.22"}\n')
     (yarn / ".corepack").write_text('{"hash":"sha512.fixture"}\n')
+    (rootfs / "proc").mkdir()
     sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
-    monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.chown", lambda *_: None)
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
     monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.lchown", lambda *_: None)
 
     sandbox._prepare_rootfs(rootfs, "/KaTeX")
@@ -611,6 +617,76 @@ def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
     assert (copied / "v1" / "yarn" / "1.22.22" / ".corepack").is_file()
     assert "nodelm-canary:x:61000:61000:" in (rootfs / "etc" / "passwd").read_text()
     assert "nodelm-canary:x:61000:" in (rootfs / "etc" / "group").read_text()
+    sandbox_stat = rootfs / "proc" / "self" / "stat"
+    assert sandbox_stat.read_text(encoding="ascii") == (
+        "1 (nodelm-canary) R 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n"
+    )
+    assert stat.S_IMODE(sandbox_stat.stat().st_mode) == 0o444
+    assert stat.S_IMODE(sandbox_stat.parent.stat().st_mode) == 0o555
+    assert stat.S_IMODE(sandbox_stat.parent.parent.stat().st_mode) == 0o555
+    assert (sandbox_stat.parent.parent, 0, 0) in chown_calls
+    assert (sandbox_stat.parent, 0, 0) in chown_calls
+    assert (sandbox_stat, 0, 0) in chown_calls
+
+
+@pytest.mark.parametrize("unsafe_component", ["proc", "proc/self"])
+def test_seccomp_chroot_rejects_symlinked_sandbox_proc_before_chown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_component: str
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    outside = tmp_path / "outside"
+    (rootfs / "repository").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    outside.mkdir()
+    unsafe_path = rootfs / unsafe_component
+    unsafe_path.parent.mkdir(parents=True, exist_ok=True)
+    unsafe_path.symlink_to(outside, target_is_directory=True)
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="sandbox proc"):
+        sandbox._prepare_rootfs(rootfs, "/repository")
+
+    assert list(outside.iterdir()) == []
+    assert chown_calls == []
+
+
+@pytest.mark.parametrize("unsafe_kind", ["regular_file", "nonempty_directory"])
+def test_seccomp_chroot_rejects_prepopulated_sandbox_proc_before_chown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe_kind: str
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "repository").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    proc = rootfs / "proc"
+    if unsafe_kind == "regular_file":
+        proc.write_text("not a proc directory\n", encoding="ascii")
+    else:
+        proc.mkdir()
+        (proc / "host-state").write_text("must not be retained\n", encoding="ascii")
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="sandbox proc"):
+        sandbox._prepare_rootfs(rootfs, "/repository")
+
+    assert chown_calls == []
 
 
 def test_seccomp_chroot_rejects_conflicting_sandbox_uid_before_chown(

@@ -60,6 +60,7 @@ _AVA_REJECTION_FAILURE = re.compile(
 )
 _AVA_FAILURE_DETAIL = re.compile(r"^ {2}(\S(?:.*\S)?)\s*$")
 _AVA_FAILED_SUMMARY = re.compile(r"^\s*[1-9]\d*\s+tests?\s+failed\s*$")
+_SYNTHETIC_PROC_SELF_STAT = "1 (nodelm-canary) R 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n"
 
 SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
 SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
@@ -1055,6 +1056,30 @@ class SWERebenchSeccompChrootSandbox:
         group.chmod(0o644)
 
     @staticmethod
+    def _prepare_sandbox_proc(rootfs: Path) -> None:
+        proc = rootfs / "proc"
+        if proc.is_symlink() or (proc.exists() and not proc.is_dir()):
+            raise ResolutionCanaryError("OCI sandbox proc is unsafe")
+        try:
+            if proc.exists() and any(proc.iterdir()):
+                raise ResolutionCanaryError("OCI sandbox proc is not empty")
+            proc.mkdir(mode=0o755, exist_ok=True)
+            sandbox_self = proc / "self"
+            sandbox_self.mkdir(mode=0o755)
+            sandbox_stat = sandbox_self / "stat"
+            sandbox_stat.write_text(_SYNTHETIC_PROC_SELF_STAT, encoding="ascii")
+            os.chown(proc, 0, 0)
+            os.chown(sandbox_self, 0, 0)
+            os.chown(sandbox_stat, 0, 0)
+            sandbox_stat.chmod(0o444)
+            sandbox_self.chmod(0o555)
+            proc.chmod(0o555)
+        except ResolutionCanaryError:
+            raise
+        except OSError as error:
+            raise ResolutionCanaryError("OCI sandbox proc is unsafe") from error
+
+    @staticmethod
     def _validated_corepack_cache(rootfs: Path) -> Path | None:
         candidate = rootfs
         for part in ("root", ".cache", "node", "corepack"):
@@ -1107,6 +1132,10 @@ class SWERebenchSeccompChrootSandbox:
         if home.is_symlink() or home.exists():
             raise ResolutionCanaryError("OCI sandbox home is unsafe")
 
+        # libuv reads /proc/self/stat for process.memoryUsage(), while mounting the
+        # host procfs would expose host state. A fixed zero-RSS record supplies only
+        # the field package-manager reporters require inside the offline chroot.
+        self._prepare_sandbox_proc(resolved_rootfs)
         self._prepare_sandbox_identity(resolved_rootfs)
         inputs = rootfs / "nodelm-input"
         inputs.mkdir(mode=0o700)
