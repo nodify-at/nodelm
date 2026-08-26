@@ -108,6 +108,10 @@ from nodelm.harness.discovery import discover_typescript_workspace
 from nodelm.infra.doctor import collect_infrastructure_report
 from nodelm.logging import configure_structured_logging
 from nodelm.models import NormalizedSample, VerificationStatus, stable_model_id
+from nodelm.provenance.cohort import (
+    NormalizationCohortError,
+    build_normalization_cohort,
+)
 from nodelm.provenance.gold import (
     GoldExposureAudit,
     GoldExposureAuthorizationError,
@@ -134,6 +138,7 @@ from nodelm.provenance.normalize import (
     validate_gold_free_trajectory,
 )
 from nodelm.provenance.pipeline import (
+    normalization_evidence_lineage,
     normalize_trace_sample,
     task_metadata_index,
     trace_rollout_key,
@@ -2244,12 +2249,13 @@ def datasets_normalize(
         )
 
     rejection_path = rejections_output or output.with_name(f"{output.stem}.rejections.jsonl")
-    extra_lineage = (
-        f"materialization:{materialization_identity[0]}",
-        f"trace-partition:{selected_partition.name}",
-        f"upstream-source:{selected_partition.upstream_source}",
-        f"task-provenance:{task_source_name}@{task_source_revision}",
-        f"task-provenance-artifact:{task_identity[0]}",
+    extra_lineage = normalization_evidence_lineage(
+        materialization_manifest_sha256=materialization_identity[0],
+        partition_name=selected_partition.name,
+        upstream_source=selected_partition.upstream_source,
+        task_source_name=task_source_name,
+        task_source_revision=task_source_revision,
+        task_provenance_sha256=task_identity[0],
     )
 
     def verify_inputs() -> None:
@@ -2495,6 +2501,29 @@ def datasets_normalize(
     )
     if accepted_count == 0:
         raise typer.Exit(code=1)
+
+
+@datasets_app.command("build-normalization-cohort")
+def datasets_build_normalization_cohort(
+    member_manifests: list[Path] = typer.Option(
+        ...,
+        "--member-manifest",
+        exists=True,
+        dir_okay=False,
+        help="Repeat for each complete-partition normalization manifest",
+    ),
+    output: Path = typer.Option(..., "--output", dir_okay=False),
+) -> None:
+    """Bind selected complete normalized leaves without concatenating their data files."""
+
+    try:
+        result, cohort = build_normalization_cohort(tuple(member_manifests), output)
+    except (NormalizationCohortError, OSError, ValidationError) as error:
+        raise typer.BadParameter(f"invalid normalization cohort: {error}") from error
+    typer.echo(
+        f"wrote {result.path} members={cohort.member_count} "
+        f"samples={cohort.sample_count} sha256={result.digest}"
+    )
 
 
 @datasets_app.command("audit-gold-exposure")

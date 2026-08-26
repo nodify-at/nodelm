@@ -564,3 +564,85 @@ class NormalizationManifestV2(_ArtifactManifest):
         if self.duplicate_trace_row_count and not self.accepted_count:
             raise ValueError("duplicate trace rejections require an accepted rollout identity")
         return self
+
+
+class NormalizationCohortMemberV1(_DerivedManifest):
+    partition_name: PartitionName
+    harness: Annotated[StrictStr, Field(pattern=r"^[a-z0-9._-]+$")]
+    generating_model: NonEmptyStr
+    normalization_manifest: ManifestFileIdentity
+    normalized_artifact: ManifestFileIdentity
+    accepted_count: PositiveRowCount
+
+
+class NormalizationCohortManifestV1(_ArtifactManifest):
+    schema_version: Literal["nodelm.normalization-cohort-manifest/v1"]
+    status: Literal["PASS"]
+    cohort_scope: Literal["complete-selected-members"]
+    member_order: Literal["partition-name-ascending"]
+    population_identity: Literal["sha256-exact-member-concatenation/v1"]
+    source_name: NonEmptyStr
+    source_repository_id: Annotated[
+        StrictStr,
+        Field(pattern=r"^[^/\s]+/[^/\s]+$"),
+    ]
+    source_revision: CommitSha
+    upstream_source: Annotated[StrictStr, Field(pattern=r"^[a-z0-9._-]+$")]
+    row_dataset_name: Annotated[StrictStr, Field(pattern=r"^[^/\s]+/[^/\s]+$")]
+    registry_sha256: Sha256
+    partition_contract_sha256: Sha256
+    partition_contract_bytes: ByteCount
+    trace_transfer_receipt_sha256: Sha256
+    trace_transfer_receipt_bytes: ByteCount
+    task_provenance_sha256: Sha256
+    task_provenance_bytes: ByteCount
+    task_provenance_manifest_sha256: Sha256
+    task_provenance_manifest_bytes: ByteCount
+    task_transfer_receipt_sha256: Sha256
+    task_transfer_receipt_bytes: ByteCount
+    task_source_name: Annotated[
+        StrictStr,
+        Field(pattern=r"^[a-z0-9][a-z0-9._-]*$"),
+    ]
+    task_source_revision: CommitSha
+    member_count: Annotated[StrictInt, Field(ge=2)]
+    members: tuple[NormalizationCohortMemberV1, ...] = Field(min_length=2)
+    sample_count: PositiveRowCount
+    unique_sample_id_count: PositiveRowCount
+    population_sha256: Sha256
+    population_bytes: ByteCount
+    gold_exposure_audit: Literal["NOT RUN"]
+
+    @field_validator("members")
+    @classmethod
+    def require_sorted_unique_members(
+        cls,
+        members: tuple[NormalizationCohortMemberV1, ...],
+    ) -> tuple[NormalizationCohortMemberV1, ...]:
+        partitions = tuple(member.partition_name for member in members)
+        if partitions != tuple(sorted(partitions)) or len(partitions) != len(set(partitions)):
+            raise ValueError("cohort members must have unique, strictly sorted partitions")
+        manifest_paths = tuple(member.normalization_manifest.path for member in members)
+        normalized_paths = tuple(member.normalized_artifact.path for member in members)
+        if len(manifest_paths) != len(set(manifest_paths)):
+            raise ValueError("cohort member manifest paths must be unique")
+        if len(normalized_paths) != len(set(normalized_paths)):
+            raise ValueError("cohort normalized artifact paths must be unique")
+        if set(manifest_paths) & set(normalized_paths):
+            raise ValueError("cohort manifest and normalized artifact paths must be disjoint")
+        return members
+
+    @model_validator(mode="after")
+    def verify_cohort_accounting(self) -> NormalizationCohortManifestV1:
+        if self.member_count != len(self.members):
+            raise ValueError("member_count must equal the number of cohort members")
+        member_samples = sum(member.accepted_count for member in self.members)
+        if self.sample_count != member_samples:
+            raise ValueError("sample_count must equal the sum of member sample counts")
+        if self.unique_sample_id_count != self.sample_count:
+            raise ValueError("cohort sample IDs must be globally unique")
+        if self.population_bytes != sum(
+            member.normalized_artifact.bytes for member in self.members
+        ):
+            raise ValueError("population_bytes must equal the sum of member artifact bytes")
+        return self

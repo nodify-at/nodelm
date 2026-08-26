@@ -9,6 +9,7 @@ from nodelm.datasets.staging import (
     RegularFileIdentity,
     VerifiedStagingError,
     regular_file_tree_identity,
+    verified_staged_file,
     verified_staged_files,
     verified_staged_regular_file_tree,
 )
@@ -42,6 +43,30 @@ def test_verified_staging_rejects_wrong_identity(tmp_path: Path) -> None:
         verified_staged_files(((source, ("0" * 64, source.stat().st_size)),)),
     ):
         raise AssertionError("unreachable")
+
+
+def test_single_file_verified_staging_rechecks_source_after_use(tmp_path: Path) -> None:
+    source = tmp_path / "source.jsonl"
+    source.write_text('{"row":1}\n', encoding="utf-8")
+    expected = file_identity(source)
+
+    with (
+        pytest.raises(VerifiedStagingError, match="changed while staged"),
+        verified_staged_file(source, expected) as staged,
+    ):
+        assert staged.read_bytes() == source.read_bytes()
+        source.write_text('{"row":2}\n', encoding="utf-8")
+
+
+def test_single_file_verified_staging_removes_private_copy(tmp_path: Path) -> None:
+    source = tmp_path / "source.parquet"
+    source.write_bytes(b"fixture")
+
+    with verified_staged_file(source, file_identity(source)) as staged:
+        staged_root = staged.parent
+        assert staged.suffix == ".parquet"
+
+    assert not staged_root.exists()
 
 
 def test_verified_tree_staging_is_private_and_aba_safe(tmp_path: Path) -> None:

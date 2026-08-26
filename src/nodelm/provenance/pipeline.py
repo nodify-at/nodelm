@@ -23,6 +23,39 @@ TaskMetadata = dict[str, str]
 TaskMetadataLookup = Callable[[str], TaskMetadata | None]
 
 
+def normalization_evidence_lineage(
+    *,
+    materialization_manifest_sha256: str,
+    partition_name: str,
+    upstream_source: str,
+    task_source_name: str,
+    task_source_revision: str,
+    task_provenance_sha256: str,
+) -> tuple[str, ...]:
+    """Serialize the reserved lineage namespace shared by producer and verifier."""
+
+    return (
+        f"materialization:{materialization_manifest_sha256}",
+        f"trace-partition:{partition_name}",
+        f"upstream-source:{upstream_source}",
+        f"task-provenance:{task_source_name}@{task_source_revision}",
+        f"task-provenance-artifact:{task_provenance_sha256}",
+    )
+
+
+def has_exact_normalization_evidence_lineage(
+    lineage: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> bool:
+    """Require exactly one expected value in each reserved lineage namespace."""
+
+    return all(
+        tuple(item for item in lineage if item.startswith(f"{value.partition(':')[0]}:"))
+        == (value,)
+        for value in expected
+    )
+
+
 def trace_rollout_key(
     row: Mapping[str, Any],
     *,

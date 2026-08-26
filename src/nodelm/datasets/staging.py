@@ -197,6 +197,31 @@ def verified_staged_files(
 
 
 @contextmanager
+def verified_staged_file(
+    source: Path,
+    expected: tuple[str, int],
+) -> Iterator[Path]:
+    """Expose one private identity-verified copy and recheck its source on exit.
+
+    This is the bounded-space counterpart to :func:`verified_staged_files` for callers
+    that can consume a sequence one file at a time. At most one source-sized copy exists.
+    """
+
+    with verified_staged_files(((source, expected),)) as staged_files:
+        try:
+            yield staged_files[0]
+        finally:
+            try:
+                observed = file_identity(source)
+            except OSError as error:
+                raise VerifiedStagingError(
+                    f"unable to recheck input while staged {source}: {error}"
+                ) from error
+            if observed != expected:
+                raise VerifiedStagingError(f"input changed while staged: {source}")
+
+
+@contextmanager
 def verified_staged_regular_file_tree(
     source_root: Path,
     expected: RegularFileTreeIdentity,
