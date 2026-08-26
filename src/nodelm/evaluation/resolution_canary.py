@@ -801,13 +801,6 @@ class SkopeoChrootImageLocker:
         )
 
 
-def _repository_workdir(task: SWERebenchTask) -> str:
-    repository_name = task.repository.rsplit("/", 1)[-1]
-    if re.fullmatch(r"[A-Za-z0-9._-]+", repository_name) is None:
-        raise ResolutionCanaryError("task repository name is unsafe for a sandbox workdir")
-    return f"/{repository_name}"
-
-
 def _attempt_script(case: ResolutionCanaryCase, *, include_model_patch: bool) -> str:
     commands = [
         "set -euo pipefail",
@@ -963,8 +956,25 @@ class SWERebenchSeccompChrootSandbox:
             merged["PATH"] = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         return tuple(merged[key] for key in sorted(merged))
 
-    def _prepare_rootfs(self, rootfs: Path, case: ResolutionCanaryCase) -> str:
-        workdir = _repository_workdir(case.task)
+    @staticmethod
+    def _image_workdir(bundle: Path) -> str:
+        try:
+            value = cast(object, json.loads((bundle / "config.json").read_bytes()))
+            process = cast(dict[str, object], value).get("process")
+            workdir = cast(dict[str, object], process).get("cwd")
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ResolutionCanaryError("OCI runtime working directory is invalid") from error
+        if (
+            not isinstance(workdir, str)
+            or "\0" in workdir
+            or not workdir.startswith("/")
+            or workdir == "/"
+            or any(part in {"", ".", ".."} for part in workdir.split("/")[1:])
+        ):
+            raise ResolutionCanaryError("OCI runtime working directory is invalid")
+        return workdir
+
+    def _prepare_rootfs(self, rootfs: Path, workdir: str) -> None:
         repository = rootfs / workdir.removeprefix("/")
         if repository.is_symlink() or not repository.is_dir():
             raise ResolutionCanaryError("OCI rootfs does not contain the expected repository")
@@ -995,7 +1005,6 @@ class SWERebenchSeccompChrootSandbox:
                 os.lchown(Path(parent) / name, self.sandbox_uid, self.sandbox_uid)
         os.chown(inputs, self.sandbox_uid, self.sandbox_uid)
         os.chown(home, self.sandbox_uid, self.sandbox_uid)
-        return workdir
 
     def run(
         self,
@@ -1035,7 +1044,8 @@ class SWERebenchSeccompChrootSandbox:
             self._clone = clone
             if clone.outcome is not OutcomeCategory.SUCCESS:
                 raise ResolutionCanaryError("fresh OCI rootfs clone failed")
-            workdir = self._prepare_rootfs(rootfs, case)
+            workdir = self._image_workdir(bundle)
+            self._prepare_rootfs(rootfs, workdir)
             inputs = rootfs / "nodelm-input"
             if include_model_patch:
                 (inputs / "model.patch").write_text(case.model_patch, encoding="utf-8")
@@ -1148,10 +1158,6 @@ class SWERebenchPodmanSandbox:
         self._cleanup: CommandResult | None = None
 
     @staticmethod
-    def _repository_workdir(task: SWERebenchTask) -> str:
-        return _repository_workdir(task)
-
-    @staticmethod
     def _script(case: ResolutionCanaryCase, *, include_model_patch: bool) -> str:
         return _attempt_script(case, include_model_patch=include_model_patch)
 
@@ -1200,7 +1206,6 @@ class SWERebenchPodmanSandbox:
             "--tmpfs=/tmp:rw,nosuid,nodev,size=1073741824",
             f"--volume={resolved_patches}:/nodelm-input:ro",
             "--env=_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
-            f"--workdir={self._repository_workdir(case.task)}",
             "--entrypoint=/bin/bash",
             image.image_digest,
             "-lc",

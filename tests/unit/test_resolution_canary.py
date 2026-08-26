@@ -424,16 +424,45 @@ def test_seccomp_chroot_preserves_image_environment_with_safe_overrides(tmp_path
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "config.json").write_text(
-        '{"process":{"env":["PATH=/custom/bin","HOME=/root","FEATURE=yes"]}}',
+        '{"process":{"cwd":"/KaTeX","env":["PATH=/custom/bin","HOME=/root","FEATURE=yes"]}}',
         encoding="utf-8",
     )
 
     environment = SWERebenchSeccompChrootSandbox._image_environment(bundle)
 
+    assert SWERebenchSeccompChrootSandbox._image_workdir(bundle) == "/KaTeX"
     assert "PATH=/custom/bin" in environment
     assert "FEATURE=yes" in environment
     assert "HOME=/tmp/nodelm-home" in environment
     assert "CI=true" in environment
+
+
+def test_seccomp_chroot_rejects_unsafe_oci_workdir(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "config.json").write_text(
+        '{"process":{"cwd":"../KaTeX","env":[]}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResolutionCanaryError, match="working directory"):
+        SWERebenchSeccompChrootSandbox._image_workdir(bundle)
+
+
+def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "KaTeX" / "src").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+    monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.chown", lambda *_: None)
+    monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.lchown", lambda *_: None)
+
+    sandbox._prepare_rootfs(rootfs, "/KaTeX")
+
+    assert (rootfs / "nodelm-input").is_dir()
+    assert (rootfs / "tmp" / "nodelm-home").is_dir()
 
 
 def test_real_repository_sandbox_command_is_offline_bounded_and_digest_pinned(
@@ -475,6 +504,7 @@ def test_real_repository_sandbox_command_is_offline_bounded_and_digest_pinned(
     assert "--env=_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false" in baseline
     assert image.image_digest in baseline
     assert image.source_image not in baseline
+    assert not any(argument.startswith("--workdir=") for argument in baseline)
     volume_arguments = tuple(argument for argument in baseline if argument.startswith("--volume="))
     assert any(argument.endswith(":/nodelm-input:ro") for argument in volume_arguments)
     assert all(":rw" not in argument for argument in volume_arguments)
