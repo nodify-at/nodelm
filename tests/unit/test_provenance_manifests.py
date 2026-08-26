@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 
 from nodelm.provenance.manifests import (
     NormalizationManifestV2,
+    ResolutionCanaryExecutionManifestV1,
     ResolutionRecoveryManifestV1,
     SnapshotMaterializationManifestV1,
     SnapshotMaterializationManifestV2,
@@ -220,6 +221,45 @@ def _resolution_recovery_with_empty_outputs() -> dict[str, Any]:
     return payload
 
 
+def _resolution_canary_execution() -> dict[str, Any]:
+    return {
+        "schema_version": "nodelm.resolution-canary-execution/v1",
+        "execution_status": "PASS",
+        "admission_status": "PASS",
+        "admission_blocker": None,
+        "code_commit": "a" * 40,
+        "recovery_manifest_sha256": "1" * 64,
+        "workset_manifest_sha256": "2" * 64,
+        "workset_manifest_bytes": 1_000,
+        "workset_sha256": "3" * 64,
+        "workset_bytes": 2_000,
+        "image_lock_sha256": "4" * 64,
+        "image_lock_bytes": 3_000,
+        "evaluator_repository_id": "SWE-rebench/SWE-rebench-V2",
+        "evaluator_revision": "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d",
+        "evaluator_log_parsers_sha256": "5" * 64,
+        "evaluator_script_sha256": "6" * 64,
+        "evaluator_constants_sha256": "8" * 64,
+        "sandbox_backend": "rootless-podman",
+        "sandbox_network": "none",
+        "sandbox_cpus_per_attempt": 2,
+        "sandbox_memory_per_attempt": "4g",
+        "results_artifact": "canary.results.jsonl",
+        "results_sha256": "7" * 64,
+        "results_bytes": 4_000,
+        "case_count": 4,
+        "passed_case_count": 4,
+        "failed_case_count": 0,
+        "transfer_control_count": 2,
+        "transfer_label_agreement_count": 2,
+        "evaluation_request_count": 2,
+        "evaluation_resolved_count": 1,
+        "evaluation_unresolved_count": 1,
+        "image_count": 4,
+        "failure_counts_by_reason": {},
+    }
+
+
 @pytest.mark.parametrize(
     ("model", "payload_factory"),
     [
@@ -228,6 +268,7 @@ def _resolution_recovery_with_empty_outputs() -> dict[str, Any]:
         (TaskProvenanceProjectionManifestV1, _task_projection),
         (NormalizationManifestV2, _normalization),
         (ResolutionRecoveryManifestV1, _resolution_recovery),
+        (ResolutionCanaryExecutionManifestV1, _resolution_canary_execution),
     ],
 )
 def test_manifest_models_round_trip_producer_payloads(
@@ -256,6 +297,7 @@ def test_materialization_v2_preserves_a_blocked_normalization_partition() -> Non
         (TaskProvenanceProjectionManifestV1, _task_projection),
         (NormalizationManifestV2, _normalization),
         (ResolutionRecoveryManifestV1, _resolution_recovery),
+        (ResolutionCanaryExecutionManifestV1, _resolution_canary_execution),
     ],
 )
 def test_manifest_models_forbid_extra_fields(
@@ -280,6 +322,12 @@ def test_manifest_models_forbid_extra_fields(
         (NormalizationManifestV2, _normalization, "normalized_bytes", 700.0),
         (ResolutionRecoveryManifestV1, _resolution_recovery, "candidate_row_count", True),
         (ResolutionRecoveryManifestV1, _resolution_recovery, "queue_bytes", 3_000.0),
+        (
+            ResolutionCanaryExecutionManifestV1,
+            _resolution_canary_execution,
+            "case_count",
+            True,
+        ),
     ],
 )
 def test_manifest_models_reject_bool_and_float_counts(
@@ -408,6 +456,36 @@ def test_resolution_recovery_manifest_is_never_training_admissible(
 
     with pytest.raises(ValidationError, match=message):
         ResolutionRecoveryManifestV1.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"passed_case_count": 3}, "case_count"),
+        ({"transfer_label_agreement_count": 1}, "PASS canary"),
+        ({"evaluation_unresolved_count": 0}, "PASS canary"),
+        (
+            {
+                "execution_status": "FAIL",
+                "admission_status": "PASS",
+                "admission_blocker": None,
+                "passed_case_count": 3,
+                "failed_case_count": 1,
+                "failure_counts_by_reason": {"oracle_failed": 1},
+            },
+            "admission status",
+        ),
+    ],
+)
+def test_resolution_canary_execution_fails_closed_on_inconsistent_admission(
+    updates: dict[str, Any],
+    message: str,
+) -> None:
+    payload = _resolution_canary_execution()
+    payload.update(updates)
+
+    with pytest.raises(ValidationError, match=message):
+        ResolutionCanaryExecutionManifestV1.model_validate(payload)
 
 
 def test_resolution_recovery_manifest_rejects_unsupported_language_filter() -> None:

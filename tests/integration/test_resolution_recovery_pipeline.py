@@ -369,9 +369,7 @@ def test_build_resolution_canary_workset_replays_exact_controls_and_private_task
     assert "PRIVATE_TEST_PATCH" in workset_payload
     assert "GOLD_SOLUTION_MUST_NOT_ENTER_WORKSET" not in workset_payload
 
-    workset_manifest = ResolutionCanaryWorksetManifestV1.model_validate_json(
-        manifest.read_bytes()
-    )
+    workset_manifest = ResolutionCanaryWorksetManifestV1.model_validate_json(manifest.read_bytes())
     assert workset_manifest.materialization_status == "PASS"
     assert workset_manifest.execution_status == "NOT RUN"
     assert workset_manifest.admission_status == "BLOCKED"

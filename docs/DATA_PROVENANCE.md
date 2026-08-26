@@ -41,15 +41,23 @@ The normalization flow is:
 6. Classify rollout identity in a temporary SQLite index scoped to source revision and exact
    partition leaf. Preserve distinct rollout IDs, admit only the first exact duplicate, reject
    all occurrences of a conflicting rollout key, and enforce accepted + rejected = input rows.
-7. Index task statements plus reference and generated patches only inside the disk-backed split
+7. Recover unknown Qwen3.6 resolution labels only through an immutable sidecar. Exact transfer
+   requires unanimous known evidence for the same pinned task source, trace source, instance, and
+   UTF-8 model-patch digest. Everything else enters one deduplicated evaluator request per exact
+   key. Neither sidecar may contain trajectories or gold/reference/test content, and its recovery
+   manifest remains non-admitting. Before downstream use, a separate private canary workset joins
+   selected cases to test patches and expected tests, explicitly drops the gold solution patch,
+   pins evaluator source and container digests, reproduces failing baselines, and validates known
+   transfer labels in offline rootless containers.
+8. Index task statements plus reference and generated patches only inside the disk-backed split
    gate. Exact and measured near matches form connected repository groups alongside declared
    mirrors/forks.
-8. Compare both task and patch fingerprints with an explicitly selected public benchmark.
+9. Compare both task and patch fingerprints with an explicitly selected public benchmark.
    Exclude every connected group containing a benchmark-overlap sample, then deterministically
    assign the remaining groups to training or private evaluation. Build the split only from
    private identity-verified copies of every input and require its reviewed digest to be
    authorized for the exact normalized artifact before pilot construction.
-9. Derive a pilot manifest and companion training JSONL only when the frozen split, normalization
+10. Derive a pilot manifest and companion training JSONL only when the frozen split, normalization
    manifest, and reviewed/code-authorized `PASS` gold-exposure audit bind the same normalized bytes
    and complete row count. Re-scan every training-visible trajectory, retain oracle-isolation
    attestation identity, and never move repositories across the split. The one-step lifecycle
@@ -94,8 +102,11 @@ unknown-resolution rejections. This is canary evidence only; full-partition norm
 the separate gold-exposure/decontamination gates were still `NOT RUN` at that canary boundary.
 Later on 2026-08-25, all seven eligible full-partition leaves reached terminal evidence: four
 MiniMax/Qwen3.5 leaves are `PASS`, while three all-unknown Qwen3.6 leaves are truthful `FAIL`.
-Resolution recovery and the separate gold-exposure/decontamination gates remain `NOT RUN`.
-Exact hashes are in `docs/EXPERIMENTS.md`.
+The subsequent real recovery derivation at commit
+`74c9b505eb1a608431ae3a18a3fca5d084f2ae3b` completed with zero conflicts and published
+1,804 unique exact-transfer keys plus 49,572 unique evaluator requests. Its admission remains
+`BLOCKED` until the real-repository canary runs. The separate gold-exposure/decontamination gates
+remain `NOT RUN`. Exact hashes are in `docs/EXPERIMENTS.md`.
 
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

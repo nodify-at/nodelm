@@ -5,12 +5,13 @@ Real transfer and receipt-bound core audit status: `PASS` (completed 2026-08-24)
 One real receipt-replayed normalization canary is `PASS`, and all seven eligible full-partition
 Open-SWE leaves now have terminal evidence: four labeled MiniMax/Qwen3.5 leaves are `PASS`, while
 the three Qwen3.6 leaves are truthful `FAIL` because every source resolution is unknown.
-Gold-exposure auditing, resolution-recovery derivation, decontamination, and split freezing remain
-`NOT RUN`. The completed snapshots and raw evidence live outside Git under `/workspace/nodelm` on
-persistent storage; their compact digest index is `artifacts/reports/FULL_DATASET_AUDIT.md`. No
-re-download is currently required. Use this runbook only for recovery or an explicitly authorized
-re-execution on a new, empty external-volume destination. Never run the transfer commands from the
-local project workspace.
+Resolution-recovery derivation is also complete, but its immutable manifest remains admission
+`BLOCKED` pending the real-repository canary. Gold-exposure auditing, decontamination, and split
+freezing remain `NOT RUN`. The completed snapshots and raw evidence live outside Git under
+`/workspace/nodelm` on persistent storage; their compact digest index is
+`artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is currently required. Use this runbook
+only for canary execution, recovery, or an explicitly authorized re-execution on a new, empty
+external-volume destination. Never run transfer commands from the local project workspace.
 
 ## Completed evidence and safeguards
 
@@ -30,12 +31,19 @@ local project workspace.
   the project workspace. The three real snapshots and their receipt/audit/rejection/lineage
   bundles are retained on the external persistent volume.
 
-## Resolution-recovery derivation (prepared, not run)
+## Resolution-recovery derivation (completed, admission blocked)
 
-The prepared recovery runner is a CPU/data-integrity operation. It derives exact task-and-patch
-label-transfer candidates plus a deduplicated evaluator queue whose manifest remains admission
-`BLOCKED`. It does not download data, start a repository evaluator, load a model, train, use a
-GPU, or admit recovered labels into normalization.
+The CPU/data-integrity runner completed at commit
+`74c9b505eb1a608431ae3a18a3fca5d084f2ae3b`. It derived exact task-and-patch label-transfer
+candidates plus a deduplicated evaluator queue. The validated manifest remains admission
+`BLOCKED`; it did not download data, start a repository evaluator, load a model, train, use a GPU,
+or admit recovered labels into normalization.
+
+Terminal evidence is retained at
+`/workspace/nodelm/derived/resolution-recovery-74c9b505eb1a608431ae3a18a3fca5d084f2ae3b`.
+The run covered 179,533 target rows: 123,709 ineligible, 3,960 candidate rows, and 51,864 queued
+fanout rows. It published 1,804 unique transfer candidates and 49,572 unique evaluator requests
+with zero conflicts. Exact artifact hashes are recorded in `docs/EXPERIMENTS.md`.
 
 The production layout is fixed to the persistent Runpod mount:
 
@@ -94,6 +102,40 @@ Preserve partial outputs and temporary staging remnants for inspection; do not r
 explicit approval. Any code change creates a different commit-bound run directory. A successful
 recovery derivation still ends with `admission=BLOCKED` and `harness_canary_pending`; real evaluator
 execution is a separate later operation on a container-capable CPU host.
+
+## Resolution harness canary (prepared, not run)
+
+The canary is a sequential CPU workload; it needs no GPU and does not download any dataset. It
+does need outbound network during preparation to clone the already-pinned public evaluator and
+pull only the selected task images. Repository test containers then run with `--network=none`.
+Use an x86_64 Linux host with the existing `/workspace` persistent mount, at least 16 host CPUs,
+64 GiB RAM, ample temporary container storage, and rootless Podman with working user namespaces,
+cgroup v2 resource delegation, `fuse-overlayfs`, and `slirp4netns`. Run as an unprivileged user;
+the runner deliberately rejects root.
+
+After checking out the requested canary commit cleanly at `/workspace/nodelm/repo`, launch:
+
+```bash
+mkdir -p /workspace/nodelm/logs
+nohup bash /workspace/nodelm/repo/scripts/run_resolution_canary.sh \
+  >/workspace/nodelm/logs/resolution-canary.launch.log 2>&1 &
+```
+
+The exact output directory is content-bound to the checked-out commit:
+
+```bash
+NODELM_RUN_COMMIT="$(git -C /workspace/nodelm/repo rev-parse HEAD)"
+NODELM_CANARY_DIR="/workspace/nodelm/derived/resolution-canary-${NODELM_RUN_COMMIT}"
+cat "${NODELM_CANARY_DIR}/run.state"
+tail -n 50 "${NODELM_CANARY_DIR}/events.log"
+```
+
+Before evaluation begins, request a clean stop with `touch "${NODELM_CANARY_DIR}/STOP"`. During
+image pulling or evaluation, read `pid=` from `run.state` and send TERM; the runner stops its
+active process group, force-cleans labeled canary containers, and records `STOPPED`. Per-case
+private evidence is immutable and restartable, so a same-commit restart reuses completed cases.
+Terminal `COMPLETE` means all artifacts and raw-log hashes validated; read
+`resolution-canary.execution.manifest.json` for the separate execution and admission verdicts.
 
 ## Large-storage host preflight
 

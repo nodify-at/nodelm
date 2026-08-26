@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNNER = PROJECT_ROOT / "scripts" / "run_resolution_canary.sh"
+
+
+def test_resolution_canary_runner_is_valid_bash_with_durable_operator_state() -> None:
+    syntax = subprocess.run(
+        ["bash", "-n", str(RUNNER)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert syntax.returncode == 0, syntax.stderr
+    assert 'write_state "RUNNING"' in source
+    assert 'write_state "STOPPED"' in source
+    assert 'write_state "COMPLETE"' in source
+    assert "private-case-evidence" in source
+    assert "lock-resolution-canary-images" in source
+    assert "run-resolution-canary" in source
+    assert "kill -TERM" in source
+
+
+def test_resolution_canary_runner_requires_rootless_execution_and_offline_tests() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+
+    assert '[[ "${EUID}" -ne 0 ]]' in source
+    assert "export HF_HUB_OFFLINE=1" in source
+    assert "export UV_OFFLINE=1" in source
+    assert "SWE-rebench-V2-${EVALUATOR_REVISION}" in source
+    assert "pulling selected canary images" in source
+    assert "running offline real-repository canary attempts" in source

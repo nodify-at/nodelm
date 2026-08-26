@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
+import secrets
+import sys
+import tempfile
 from collections.abc import Callable, Mapping
+from contextlib import suppress
+from dataclasses import replace
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from types import ModuleType
 from typing import Annotated, Any, Literal, cast
 
 from pydantic import (
@@ -14,9 +23,9 @@ from pydantic import (
     model_validator,
 )
 
-from nodelm.artifacts import canonical_json_bytes, content_digest
+from nodelm.artifacts import canonical_json_bytes, content_digest, file_identity
 from nodelm.decontamination.fingerprints import canonical_repository
-from nodelm.harness import CommandResult, OutcomeCategory
+from nodelm.harness import CommandExecutor, CommandPolicy, CommandResult, OutcomeCategory
 from nodelm.models import VerificationStatus
 from nodelm.provenance.resolution import (
     ResolutionRowReference,
@@ -32,15 +41,19 @@ SupportedLanguage = Literal["TypeScript", "JavaScript"]
 CaseKind = Literal["transfer_control", "evaluation_request"]
 
 _CASE_IDENTITY_SCHEMA = "nodelm.resolution-canary-case-identity/v1"
-_IMAGE_DIGEST = re.compile(
-    r"^(?:sha256:[0-9a-f]{64}|[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64})$"
-)
+_IMAGE_DIGEST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
 _TIMING_NORMALIZE_RES = (
     re.compile(r"\s*\[\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\]\s*$", re.IGNORECASE),
     re.compile(r"\s+in\s+\d+(?:\.\d+)?\s+(?:msec|sec)\b", re.IGNORECASE),
     re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
 )
 _EVALUATION_OUTCOMES = frozenset({OutcomeCategory.SUCCESS, OutcomeCategory.TEST_FAILURE})
+
+SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
+SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
+SWE_REBENCH_LOG_PARSERS_SHA256 = "a717b03efde1cb79dfb11e2a57d0262c0057d352a347a9fb09667ef6e5f6f20c"
+SWE_REBENCH_EVAL_SCRIPT_SHA256 = "4768c0c3e2adf3540c2228f819f4b073e4665ada06fa00f2234a1f7620d69eda"
+SWE_REBENCH_CONSTANTS_SHA256 = "823dd1ef512d363ed5d4dce05d70f22d7f93b25722cda5b0971f17010f5168a5"
 
 
 class ResolutionCanaryError(ValueError):
@@ -100,6 +113,13 @@ def _required_string(row: Mapping[str, Any], field: str) -> str:
     return value.strip()
 
 
+def _required_raw_string(row: Mapping[str, Any], field: str) -> str:
+    value = row.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ResolutionCanaryError(f"SWE-rebench task requires non-empty {field}")
+    return value
+
+
 def _string_list(value: object, *, field: str, allow_empty: bool) -> tuple[str, ...]:
     if isinstance(value, str):
         values: object = [value]
@@ -142,7 +162,7 @@ def project_swe_rebench_task(
             base_commit=_required_string(row, "base_commit"),
             language=cast(SupportedLanguage, language),
             image_name=_required_string(row, "image_name"),
-            test_patch=_required_string(row, "test_patch"),
+            test_patch=_required_raw_string(row, "test_patch"),
             fail_to_pass=_string_list(
                 row.get("FAIL_TO_PASS"), field="FAIL_TO_PASS", allow_empty=False
             ),
@@ -159,7 +179,7 @@ def project_swe_rebench_task(
     except ValueError as error:
         if isinstance(error, ResolutionCanaryError):
             raise
-        raise ResolutionCanaryError(str(error)) from error
+        raise ResolutionCanaryError("private SWE-rebench task failed schema validation") from error
 
 
 class ResolutionCanaryCase(_StrictFrozenModel):
@@ -230,6 +250,39 @@ class PinnedContainerImage(_StrictFrozenModel):
         return value
 
 
+class ResolutionCanaryImageLock(_StrictFrozenModel):
+    schema_version: Literal["nodelm.resolution-canary-image-lock/v1"] = (
+        "nodelm.resolution-canary-image-lock/v1"
+    )
+    workset_sha256: Sha256
+    evaluator_repository_id: Literal["SWE-rebench/SWE-rebench-V2"]
+    evaluator_revision: CommitSha
+    runtime: Literal["rootless-podman"] = "rootless-podman"
+    images: tuple[PinnedContainerImage, ...] = Field(min_length=1)
+
+    @field_validator("evaluator_revision")
+    @classmethod
+    def require_evaluator_revision(cls, value: str) -> str:
+        normalized = value.casefold()
+        if normalized != SWE_REBENCH_EVALUATOR_REVISION:
+            raise ValueError("image lock evaluator revision is not the approved pin")
+        return normalized
+
+    @field_validator("images")
+    @classmethod
+    def require_sorted_unique_images(
+        cls,
+        images: tuple[PinnedContainerImage, ...],
+    ) -> tuple[PinnedContainerImage, ...]:
+        names = tuple(image.source_image for image in images)
+        if names != tuple(sorted(names)) or len(names) != len(set(names)):
+            raise ValueError("image lock source images must be unique and sorted")
+        return images
+
+    def by_source_image(self) -> dict[str, PinnedContainerImage]:
+        return {image.source_image: image for image in self.images}
+
+
 class ResolutionCanaryAttemptEvidence(_StrictFrozenModel):
     outcome: OutcomeCategory
     exit_code: int | None
@@ -258,6 +311,33 @@ class ResolutionCanaryCaseResult(_StrictFrozenModel):
     sandbox_evidence: dict[str, Any] = Field(min_length=1)
 
 
+class ResolutionCanaryPrivateCaseEvidence(_StrictFrozenModel):
+    """Private raw logs paired atomically with their sanitized case result."""
+
+    schema_version: Literal["nodelm.resolution-canary-private-case-evidence/v1"] = (
+        "nodelm.resolution-canary-private-case-evidence/v1"
+    )
+    result: ResolutionCanaryCaseResult
+    baseline_output: StrictStr
+    candidate_output: StrictStr
+
+    @model_validator(mode="after")
+    def verify_output_identities(self) -> ResolutionCanaryPrivateCaseEvidence:
+        baseline = self.baseline_output.encode("utf-8")
+        candidate = self.candidate_output.encode("utf-8")
+        if (
+            content_digest(baseline) != self.result.baseline.output_sha256
+            or len(baseline) != self.result.baseline.output_bytes
+        ):
+            raise ValueError("private baseline output does not match sanitized evidence")
+        if (
+            content_digest(candidate) != self.result.candidate.output_sha256
+            or len(candidate) != self.result.candidate.output_bytes
+        ):
+            raise ValueError("private candidate output does not match sanitized evidence")
+        return self
+
+
 LogParser = Callable[[str, str], Mapping[str, str]]
 
 
@@ -267,7 +347,7 @@ def _normalize_test_name(name: str) -> str:
     return name.strip()
 
 
-def _combined_output(result: CommandResult) -> str:
+def resolution_canary_output(result: CommandResult) -> str:
     return result.stdout + "\n" + result.stderr
 
 
@@ -277,7 +357,7 @@ def _attempt_evidence(
     expected: frozenset[str],
     parsed: Mapping[str, str],
 ) -> ResolutionCanaryAttemptEvidence:
-    output = _combined_output(result).encode("utf-8")
+    output = resolution_canary_output(result).encode("utf-8")
     return ResolutionCanaryAttemptEvidence(
         outcome=result.outcome,
         exit_code=result.exit_code,
@@ -296,7 +376,7 @@ class ResolutionCanaryOracle:
         self._parser = parser
 
     def _parse(self, case: ResolutionCanaryCase, result: CommandResult) -> dict[str, str]:
-        parsed = self._parser(case.task.log_parser, _combined_output(result))
+        parsed = self._parser(case.task.log_parser, resolution_canary_output(result))
         return {
             _normalize_test_name(name): status.upper()
             for name, status in parsed.items()
@@ -330,10 +410,17 @@ class ResolutionCanaryOracle:
             reason = "baseline_sandbox_execution_failed"
         elif candidate.outcome not in _EVALUATION_OUTCOMES:
             reason = "candidate_sandbox_execution_failed"
+        elif (
+            baseline.stdout_truncated
+            or baseline.stderr_truncated
+            or candidate.stdout_truncated
+            or candidate.stderr_truncated
+        ):
+            reason = "sandbox_output_truncated"
         elif not expected.issubset(baseline_parsed) or not expected.issubset(candidate_parsed):
             reason = "incomplete_expected_test_evidence"
-        elif any(baseline_parsed[name] != "PASSED" for name in expected_pass) or all(
-            baseline_parsed[name] == "PASSED" for name in expected_fail
+        elif any(baseline_parsed[name] != "PASSED" for name in expected_pass) or any(
+            baseline_parsed[name] != "FAILED" for name in expected_fail
         ):
             reason = "failing_baseline_not_reproduced"
         else:
@@ -368,12 +455,435 @@ class ResolutionCanaryOracle:
         )
 
 
+def _module_path(module: ModuleType) -> Path:
+    source = getattr(module, "__file__", None)
+    if not isinstance(source, str):
+        raise ResolutionCanaryError("pinned evaluator module has no source path")
+    return Path(source).resolve()
+
+
+class PinnedEvaluatorLogParser:
+    """Load only the integrity-pinned upstream parser implementation."""
+
+    def __init__(
+        self,
+        evaluator_root: Path,
+        *,
+        expected_parser_sha256: str = SWE_REBENCH_LOG_PARSERS_SHA256,
+        expected_eval_sha256: str = SWE_REBENCH_EVAL_SCRIPT_SHA256,
+        expected_constants_sha256: str = SWE_REBENCH_CONSTANTS_SHA256,
+    ) -> None:
+        if evaluator_root.is_symlink():
+            raise ResolutionCanaryError("pinned evaluator root must not be a symlink")
+        root = evaluator_root.resolve()
+        parser_path = root / "lib" / "agent" / "log_parsers.py"
+        constants_path = root / "lib" / "agent" / "swe_constants.py"
+        eval_path = root / "scripts" / "eval.py"
+        for path in (parser_path, constants_path, eval_path):
+            if not path.is_file() or path.is_symlink():
+                raise ResolutionCanaryError("pinned evaluator checkout is incomplete or unsafe")
+        parser_identity = file_identity(parser_path)
+        eval_identity = file_identity(eval_path)
+        constants_identity = file_identity(constants_path)
+        if parser_identity[0] != expected_parser_sha256:
+            raise ResolutionCanaryError("pinned evaluator log parser digest mismatch")
+        if eval_identity[0] != expected_eval_sha256:
+            raise ResolutionCanaryError("pinned evaluator script digest mismatch")
+        if constants_identity[0] != expected_constants_sha256:
+            raise ResolutionCanaryError("pinned evaluator constants digest mismatch")
+
+        module_name = f"_nodelm_swe_rebench_log_parsers_{parser_identity[0]}"
+        specification = spec_from_file_location(module_name, parser_path)
+        if specification is None or specification.loader is None:
+            raise ResolutionCanaryError("pinned evaluator log parser cannot be loaded")
+        module = module_from_spec(specification)
+        sys.path.insert(0, str(root))
+        try:
+            specification.loader.exec_module(module)
+        except Exception as error:
+            raise ResolutionCanaryError("pinned evaluator log parser failed to load") from error
+        finally:
+            with suppress(ValueError):
+                sys.path.remove(str(root))
+        constants_module = sys.modules.get("lib.agent.swe_constants")
+        if constants_module is None or _module_path(constants_module) != constants_path.resolve():
+            raise ResolutionCanaryError("pinned evaluator constants resolved outside checkout")
+        parsers = getattr(module, "NAME_TO_PARSER", None)
+        if not isinstance(parsers, Mapping) or not parsers:
+            raise ResolutionCanaryError("pinned evaluator exposes no named log parsers")
+        self._parsers = dict(parsers)
+        self.evaluator_root = root
+        self.parser_sha256 = parser_identity[0]
+        self.eval_sha256 = eval_identity[0]
+        self.constants_sha256 = constants_identity[0]
+
+    def __call__(self, parser_name: str, output: str) -> Mapping[str, str]:
+        parser = self._parsers.get(parser_name)
+        if not callable(parser):
+            raise ResolutionCanaryError("private task requests an unknown pinned log parser")
+        parsed = parser(output)
+        if not isinstance(parsed, Mapping) or any(
+            not isinstance(name, str) or not isinstance(status, str)
+            for name, status in parsed.items()
+        ):
+            raise ResolutionCanaryError("pinned evaluator log parser returned invalid evidence")
+        return cast(Mapping[str, str], parsed)
+
+
+class PodmanImageLocker:
+    """Pull selected source tags, then record their immutable registry digests."""
+
+    def __init__(
+        self,
+        *,
+        executable: str = "podman",
+        pull_timeout_seconds: float = 7_200,
+    ) -> None:
+        if not executable or "\0" in executable:
+            raise ValueError("image locker executable must be a non-empty NUL-free string")
+        if pull_timeout_seconds <= 0:
+            raise ValueError("image pull timeout must be greater than zero")
+        self.executable = executable
+        self.pull_timeout_seconds = pull_timeout_seconds
+
+    @staticmethod
+    def _repository_name(source_image: str) -> str:
+        without_digest = source_image.split("@", 1)[0]
+        last_slash = without_digest.rfind("/")
+        last_colon = without_digest.rfind(":")
+        if last_colon > last_slash:
+            return without_digest[:last_colon]
+        return without_digest
+
+    @classmethod
+    def _select_repo_digest(cls, source_image: str, output: str) -> str:
+        try:
+            values = cast(object, json.loads(output))
+        except (TypeError, ValueError) as error:
+            raise ResolutionCanaryError("Podman returned invalid image digest evidence") from error
+        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+            raise ResolutionCanaryError("Podman returned invalid image digest evidence")
+        repository = cls._repository_name(source_image)
+        matches = sorted(
+            value
+            for value in cast(list[str], values)
+            if value.startswith(f"{repository}@sha256:")
+            and _IMAGE_DIGEST.fullmatch(value) is not None
+        )
+        if len(matches) != 1:
+            raise ResolutionCanaryError(
+                "Podman did not expose one matching immutable repository digest"
+            )
+        return matches[0]
+
+    def lock(
+        self,
+        source_images: tuple[str, ...],
+        *,
+        workspace: Path,
+        workset_sha256: str,
+    ) -> ResolutionCanaryImageLock:
+        names = tuple(sorted(set(source_images)))
+        if not names:
+            raise ResolutionCanaryError("image locking requires at least one source image")
+        executor = CommandExecutor(workspace, default_max_output_bytes=1024 * 1024)
+        policy = CommandPolicy(workspace)
+        rootless = executor.run(
+            policy.generic(
+                (self.executable, "info", "--format", "{{.Host.Security.Rootless}}"),
+                trusted_local=True,
+                timeout_seconds=20,
+            )
+        )
+        if (
+            rootless.outcome is not OutcomeCategory.SUCCESS
+            or rootless.stdout.strip().lower() != "true"
+        ):
+            raise ResolutionCanaryError("Podman rootless capability probe failed")
+
+        locked: list[PinnedContainerImage] = []
+        for source_image in names:
+            pull = executor.run(
+                policy.generic(
+                    (self.executable, "pull", "--quiet", source_image),
+                    trusted_local=True,
+                    timeout_seconds=self.pull_timeout_seconds,
+                    max_output_bytes=1024 * 1024,
+                )
+            )
+            if pull.outcome is not OutcomeCategory.SUCCESS:
+                raise ResolutionCanaryError("selected canary image pull failed")
+            inspect = executor.run(
+                policy.generic(
+                    (
+                        self.executable,
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{json .RepoDigests}}",
+                        source_image,
+                    ),
+                    trusted_local=True,
+                    timeout_seconds=30,
+                )
+            )
+            if inspect.outcome is not OutcomeCategory.SUCCESS:
+                raise ResolutionCanaryError("selected canary image inspection failed")
+            locked.append(
+                PinnedContainerImage(
+                    source_image=source_image,
+                    image_digest=self._select_repo_digest(source_image, inspect.stdout.strip()),
+                )
+            )
+        return ResolutionCanaryImageLock(
+            workset_sha256=workset_sha256,
+            evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+            evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+            images=tuple(locked),
+        )
+
+
+class SWERebenchPodmanSandbox:
+    """Run model-authored patches in preloaded, digest-pinned rootless Podman images."""
+
+    def __init__(
+        self,
+        *,
+        executable: str = "podman",
+        timeout_seconds: float = 1_800,
+        max_output_bytes: int = 16 * 1024 * 1024,
+    ) -> None:
+        if not executable or "\0" in executable:
+            raise ValueError("sandbox executable must be a non-empty NUL-free string")
+        if timeout_seconds <= 0:
+            raise ValueError("sandbox timeout must be greater than zero")
+        if max_output_bytes <= 0:
+            raise ValueError("sandbox output bound must be greater than zero")
+        self.executable = executable
+        self.timeout_seconds = timeout_seconds
+        self.max_output_bytes = max_output_bytes
+        self._ready_images: set[str] = set()
+        self._rootless_probe: CommandResult | None = None
+        self._image_probe: CommandResult | None = None
+        self._cleanup: CommandResult | None = None
+
+    @staticmethod
+    def _repository_workdir(task: SWERebenchTask) -> str:
+        repository_name = task.repository.rsplit("/", 1)[-1]
+        if re.fullmatch(r"[A-Za-z0-9._-]+", repository_name) is None:
+            raise ResolutionCanaryError("task repository name is unsafe for a container workdir")
+        return f"/{repository_name}"
+
+    @staticmethod
+    def _script(case: ResolutionCanaryCase, *, include_model_patch: bool) -> str:
+        commands = [
+            "set -euo pipefail",
+            f'test "$(git rev-parse HEAD)" = "{case.task.base_commit}"',
+            "git reset --hard HEAD",
+        ]
+        if include_model_patch:
+            commands.append(
+                "git apply -v --3way --recount --ignore-space-change "
+                "--whitespace=nowarn /nodelm-input/model.patch"
+            )
+        commands.append(
+            "git apply -v --3way --recount --ignore-space-change "
+            "--whitespace=nowarn /nodelm-input/test.patch"
+        )
+        commands.extend(case.task.test_commands)
+        return "\n".join(commands)
+
+    def command(
+        self,
+        case: ResolutionCanaryCase,
+        image: PinnedContainerImage,
+        *,
+        patch_dir: Path,
+        include_model_patch: bool,
+        container_name: str,
+        cidfile: Path,
+    ) -> tuple[str, ...]:
+        if image.source_image != case.task.image_name:
+            raise ResolutionCanaryError("pinned image does not match private task image")
+        if _IMAGE_DIGEST.fullmatch(image.image_digest) is None:
+            raise ResolutionCanaryError("sandbox image is not digest-pinned")
+        resolved_patches = patch_dir.resolve()
+        if not resolved_patches.is_dir():
+            raise ResolutionCanaryError("sandbox patch directory does not exist")
+        if re.fullmatch(r"nodelm-resolution-canary-[0-9a-f]{24}", container_name) is None:
+            raise ResolutionCanaryError("sandbox container name is invalid")
+        resolved_cidfile = cidfile.resolve()
+        if resolved_cidfile.exists() or not resolved_cidfile.parent.is_dir():
+            raise ResolutionCanaryError("sandbox cidfile must be new inside an existing directory")
+        return (
+            self.executable,
+            "run",
+            "--rm",
+            f"--name={container_name}",
+            f"--cidfile={resolved_cidfile}",
+            "--label=io.nodelm.resolution-canary=true",
+            f"--label=io.nodelm.resolution-canary.case={case.case_id}",
+            "--pull=never",
+            "--network=none",
+            "--pid=private",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=512",
+            "--memory=4g",
+            "--cpus=2",
+            "--ipc=private",
+            "--ulimit=nofile=4096:4096",
+            "--ulimit=fsize=1073741824:1073741824",
+            "--ulimit=core=0:0",
+            "--tmpfs=/tmp:rw,nosuid,nodev,size=1073741824",
+            f"--volume={resolved_patches}:/nodelm-input:ro",
+            "--env=_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
+            f"--workdir={self._repository_workdir(case.task)}",
+            "--entrypoint=/bin/bash",
+            image.image_digest,
+            "-lc",
+            self._script(case, include_model_patch=include_model_patch),
+        )
+
+    def _ensure_ready(self, workspace: Path, image: PinnedContainerImage) -> None:
+        if image.image_digest in self._ready_images:
+            return
+        executor = CommandExecutor(workspace)
+        policy = CommandPolicy(workspace)
+        if self._rootless_probe is None:
+            rootless = executor.run(
+                policy.generic(
+                    (self.executable, "info", "--format", "{{.Host.Security.Rootless}}"),
+                    trusted_local=True,
+                    timeout_seconds=20,
+                )
+            )
+            self._rootless_probe = rootless
+        rootless = self._rootless_probe
+        if (
+            rootless.outcome is not OutcomeCategory.SUCCESS
+            or rootless.stdout.strip().lower() != "true"
+        ):
+            raise ResolutionCanaryError("Podman rootless capability probe failed")
+        image_probe = executor.run(
+            policy.generic(
+                (self.executable, "image", "exists", image.image_digest),
+                trusted_local=True,
+                timeout_seconds=20,
+            )
+        )
+        self._image_probe = image_probe
+        if image_probe.outcome is not OutcomeCategory.SUCCESS:
+            raise ResolutionCanaryError("digest-pinned canary image is not preloaded")
+        self._ready_images.add(image.image_digest)
+
+    def run(
+        self,
+        case: ResolutionCanaryCase,
+        image: PinnedContainerImage,
+        *,
+        include_model_patch: bool,
+    ) -> CommandResult:
+        with tempfile.TemporaryDirectory(prefix="nodelm-resolution-canary-") as temporary_name:
+            temporary = Path(temporary_name).resolve()
+            if include_model_patch:
+                (temporary / "model.patch").write_text(case.model_patch, encoding="utf-8")
+            (temporary / "test.patch").write_text(case.task.test_patch, encoding="utf-8")
+            self._ensure_ready(temporary, image)
+            container_name = f"nodelm-resolution-canary-{secrets.token_hex(12)}"
+            cidfile = temporary / "container.cid"
+            executor = CommandExecutor(temporary, default_max_output_bytes=self.max_output_bytes)
+            policy = CommandPolicy(temporary)
+            result: CommandResult | None = None
+            cleanup: CommandResult
+            try:
+                result = executor.run(
+                    policy.generic(
+                        self.command(
+                            case,
+                            image,
+                            patch_dir=temporary,
+                            include_model_patch=include_model_patch,
+                            container_name=container_name,
+                            cidfile=cidfile,
+                        ),
+                        trusted_local=True,
+                        timeout_seconds=self.timeout_seconds,
+                        failure_outcome=OutcomeCategory.TEST_FAILURE,
+                        max_output_bytes=self.max_output_bytes,
+                    )
+                )
+            finally:
+                cleanup = executor.run(
+                    policy.generic(
+                        (
+                            self.executable,
+                            "rm",
+                            "--force",
+                            "--ignore",
+                            "--time=0",
+                            "--",
+                            container_name,
+                        ),
+                        trusted_local=True,
+                        timeout_seconds=20,
+                    )
+                )
+                self._cleanup = cleanup
+            assert result is not None
+            if cleanup.outcome is not OutcomeCategory.SUCCESS:
+                return replace(
+                    result,
+                    outcome=OutcomeCategory.INTERNAL_FAILURE,
+                    stderr=(
+                        result.stderr.rstrip() + "\nsandbox container cleanup could not be verified"
+                    ).lstrip(),
+                )
+            return result
+
+    def evidence(self) -> dict[str, Any]:
+        def command_summary(result: CommandResult | None) -> dict[str, Any] | None:
+            if result is None:
+                return None
+            return {
+                "outcome": result.outcome.value,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "stdout_truncated": result.stdout_truncated,
+                "stderr_truncated": result.stderr_truncated,
+            }
+
+        return {
+            "schema_version": "nodelm.swe-rebench-podman/v1",
+            "backend": "rootless-podman",
+            "network": "none",
+            "implicit_pull": False,
+            "pids_limit": 512,
+            "memory": "4g",
+            "cpus": 2,
+            "rootless_probe": command_summary(self._rootless_probe),
+            "image_probe": command_summary(self._image_probe),
+            "cleanup": command_summary(self._cleanup),
+        }
+
+
 __all__ = [
+    "SWE_REBENCH_CONSTANTS_SHA256",
+    "SWE_REBENCH_EVALUATOR_REPOSITORY_ID",
+    "SWE_REBENCH_EVALUATOR_REVISION",
+    "SWE_REBENCH_EVAL_SCRIPT_SHA256",
+    "SWE_REBENCH_LOG_PARSERS_SHA256",
     "PinnedContainerImage",
+    "PinnedEvaluatorLogParser",
+    "PodmanImageLocker",
     "ResolutionCanaryCase",
     "ResolutionCanaryCaseResult",
     "ResolutionCanaryError",
+    "ResolutionCanaryImageLock",
     "ResolutionCanaryOracle",
+    "ResolutionCanaryPrivateCaseEvidence",
+    "SWERebenchPodmanSandbox",
     "SWERebenchTask",
     "project_swe_rebench_task",
+    "resolution_canary_output",
 ]

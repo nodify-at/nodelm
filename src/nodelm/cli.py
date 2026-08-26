@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -74,9 +75,24 @@ from nodelm.evaluation.fixture import (
 )
 from nodelm.evaluation.registry import CandidateRegistry, CandidateRegistryError
 from nodelm.evaluation.resolution_canary import (
+    SWE_REBENCH_CONSTANTS_SHA256,
+    SWE_REBENCH_EVAL_SCRIPT_SHA256,
+    SWE_REBENCH_EVALUATOR_REPOSITORY_ID,
+    SWE_REBENCH_EVALUATOR_REVISION,
+    SWE_REBENCH_LOG_PARSERS_SHA256,
+    PinnedContainerImage,
+    PinnedEvaluatorLogParser,
+    PodmanImageLocker,
+    ResolutionCanaryCase,
+    ResolutionCanaryCaseResult,
     ResolutionCanaryError,
+    ResolutionCanaryImageLock,
+    ResolutionCanaryOracle,
+    ResolutionCanaryPrivateCaseEvidence,
+    SWERebenchPodmanSandbox,
     SWERebenchTask,
     project_swe_rebench_task,
+    resolution_canary_output,
 )
 from nodelm.evaluation.sandbox import PodmanFixtureSandbox
 from nodelm.harness import (
@@ -101,6 +117,7 @@ from nodelm.provenance.manifests import (
     TASK_PROVENANCE_SAFE_FIELDS,
     ManifestFileIdentity,
     NormalizationManifestV2,
+    ResolutionCanaryExecutionManifestV1,
     ResolutionCanaryWorksetManifestV1,
     ResolutionLanguage,
     ResolutionPartitionInput,
@@ -164,9 +181,6 @@ app.add_typer(harness_app, name="harness")
 app.add_typer(infra_app, name="infra")
 app.add_typer(models_app, name="models")
 app.add_typer(training_app, name="training")
-
-SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
-SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
 
 
 @app.callback()
@@ -1360,11 +1374,16 @@ def datasets_build_resolution_canary_workset(
                     "private task snapshot does not contain every selected instance"
                 )
 
-            cases = materialize_resolution_canary_cases(
-                selection,
-                recovered_controls=recovered_controls,
-                tasks_by_instance=tasks_by_instance,
-            )
+            try:
+                cases = materialize_resolution_canary_cases(
+                    selection,
+                    recovered_controls=recovered_controls,
+                    tasks_by_instance=tasks_by_instance,
+                )
+            except ValidationError as error:
+                raise ResolutionCanaryError(
+                    "private canary cases failed schema validation"
+                ) from error
 
             def verify_inputs() -> None:
                 for path, identity in (
@@ -1463,6 +1482,271 @@ def datasets_build_resolution_canary_workset(
     typer.echo(
         f"wrote workset={workset_result.path} cases={canary_manifest.case_count}; "
         f"manifest={manifest_result.path} execution={canary_manifest.execution_status}"
+    )
+
+
+def _load_resolution_canary_workset(
+    workset: Path,
+    workset_manifest: Path,
+) -> tuple[
+    tuple[ResolutionCanaryCase, ...],
+    ResolutionCanaryWorksetManifestV1,
+    tuple[str, int],
+    tuple[str, int],
+]:
+    workset_identity = file_identity(workset)
+    manifest_identity = file_identity(workset_manifest)
+    manifest = ResolutionCanaryWorksetManifestV1.model_validate_json(workset_manifest.read_bytes())
+    if workset_identity != (manifest.workset_sha256, manifest.workset_bytes):
+        raise ResolutionCanaryError("private workset does not match its manifest")
+    if (
+        manifest.evaluator_repository_id != SWE_REBENCH_EVALUATOR_REPOSITORY_ID
+        or manifest.evaluator_revision.casefold() != SWE_REBENCH_EVALUATOR_REVISION
+    ):
+        raise ResolutionCanaryError("private workset does not bind the approved evaluator")
+    try:
+        cases = tuple(ResolutionCanaryCase.model_validate(row) for row in _read_jsonl(workset))
+    except ValidationError as error:
+        raise ResolutionCanaryError("private workset failed schema validation") from error
+    if tuple(case.case_id for case in cases) != tuple(sorted({case.case_id for case in cases})):
+        raise ResolutionCanaryError("private workset cases must be unique and sorted")
+    controls = sum(case.kind == "transfer_control" for case in cases)
+    requests = sum(case.kind == "evaluation_request" for case in cases)
+    if (
+        len(cases) != manifest.case_count
+        or controls != manifest.transfer_control_count
+        or requests != manifest.evaluation_request_count
+        or tuple(sorted({case.language for case in cases})) != manifest.languages
+    ):
+        raise ResolutionCanaryError("private workset contents do not match manifest accounting")
+    return cases, manifest, workset_identity, manifest_identity
+
+
+@datasets_app.command("lock-resolution-canary-images")
+def datasets_lock_resolution_canary_images(
+    workset: Path = typer.Option(..., "--workset", exists=True, dir_okay=False),
+    workset_manifest: Path = typer.Option(..., "--workset-manifest", exists=True, dir_okay=False),
+    output: Path = typer.Option(..., "--output", dir_okay=False),
+    podman: str = typer.Option("podman", "--podman"),
+) -> None:
+    """Pull only selected canary images and publish immutable digest pins."""
+
+    try:
+        cases, _, workset_identity, manifest_identity = _load_resolution_canary_workset(
+            workset,
+            workset_manifest,
+        )
+        output.resolve().parent.mkdir(parents=True, exist_ok=True)
+        lock = PodmanImageLocker(executable=podman).lock(
+            tuple(case.task.image_name for case in cases),
+            workspace=output.resolve().parent,
+            workset_sha256=workset_identity[0],
+        )
+
+        def verify_inputs() -> None:
+            _require_unchanged_file(workset, workset_identity)
+            _require_unchanged_file(workset_manifest, manifest_identity)
+
+        result = write_immutable_json(
+            output,
+            lock.model_dump(mode="json"),
+            before_publish=verify_inputs,
+        )
+    except (OSError, ResolutionCanaryError, ValidationError, ValueError) as error:
+        raise typer.BadParameter(f"resolution canary image locking failed: {error}") from error
+    typer.echo(f"wrote image_lock={result.path} images={len(lock.images)}")
+
+
+def _load_private_case_evidence(
+    path: Path,
+    *,
+    case: ResolutionCanaryCase,
+    image: PinnedContainerImage,
+) -> ResolutionCanaryPrivateCaseEvidence:
+    try:
+        evidence = ResolutionCanaryPrivateCaseEvidence.model_validate_json(path.read_bytes())
+    except ValidationError as error:
+        raise ResolutionCanaryError("private case evidence failed schema validation") from error
+    if (
+        evidence.result.case_id != case.case_id
+        or evidence.result.kind != case.kind
+        or evidence.result.source_id != case.source_id
+        or evidence.result.image != image
+    ):
+        raise ResolutionCanaryError("private case evidence does not match selected canary case")
+    return evidence
+
+
+@datasets_app.command("run-resolution-canary")
+def datasets_run_resolution_canary(
+    workset: Path = typer.Option(..., "--workset", exists=True, dir_okay=False),
+    workset_manifest: Path = typer.Option(..., "--workset-manifest", exists=True, dir_okay=False),
+    image_lock: Path = typer.Option(..., "--image-lock", exists=True, dir_okay=False),
+    evaluator_root: Path = typer.Option(..., "--evaluator-root", exists=True, file_okay=False),
+    case_evidence_dir: Path = typer.Option(..., "--case-evidence-dir", file_okay=False),
+    results_output: Path = typer.Option(..., "--results-output", dir_okay=False),
+    manifest_output: Path = typer.Option(..., "--manifest-output", dir_okay=False),
+    code_commit: str = typer.Option(..., "--code-commit"),
+    podman: str = typer.Option("podman", "--podman"),
+) -> None:
+    """Run the private real-repository canary with offline, bounded containers."""
+
+    if results_output.resolve() == manifest_output.resolve():
+        raise typer.BadParameter("results and manifest outputs must be distinct")
+    try:
+        cases, workset_record, workset_identity, workset_manifest_identity = (
+            _load_resolution_canary_workset(workset, workset_manifest)
+        )
+        image_lock_identity = file_identity(image_lock)
+        locked = ResolutionCanaryImageLock.model_validate_json(image_lock.read_bytes())
+        if locked.workset_sha256 != workset_identity[0]:
+            raise ResolutionCanaryError("image lock does not bind the private workset")
+        images = locked.by_source_image()
+        required_images = {case.task.image_name for case in cases}
+        if set(images) != required_images:
+            raise ResolutionCanaryError("image lock does not exactly cover selected images")
+
+        parser = PinnedEvaluatorLogParser(evaluator_root)
+        oracle = ResolutionCanaryOracle(parser)
+        sandbox = SWERebenchPodmanSandbox(executable=podman)
+        case_evidence_dir.mkdir(parents=True, exist_ok=True)
+        if case_evidence_dir.is_symlink() or not case_evidence_dir.is_dir():
+            raise ResolutionCanaryError("private case evidence directory is unsafe")
+        expected_names = {f"{case.case_id}.json" for case in cases}
+        actual_names = {path.name for path in case_evidence_dir.iterdir()}
+        if not actual_names.issubset(expected_names):
+            raise ResolutionCanaryError("private case evidence directory has unexpected entries")
+
+        safe_results: list[ResolutionCanaryCaseResult] = []
+        evidence_identities: list[tuple[Path, tuple[str, int]]] = []
+        for case in cases:
+            image = images[case.task.image_name]
+            evidence_path = case_evidence_dir / f"{case.case_id}.json"
+            if evidence_path.exists():
+                if not evidence_path.is_file() or evidence_path.is_symlink():
+                    raise ResolutionCanaryError("private case evidence path is unsafe")
+                evidence = _load_private_case_evidence(
+                    evidence_path,
+                    case=case,
+                    image=image,
+                )
+            else:
+                baseline = sandbox.run(case, image, include_model_patch=False)
+                candidate = sandbox.run(case, image, include_model_patch=True)
+                result = oracle.evaluate(
+                    case,
+                    image=image,
+                    baseline=baseline,
+                    candidate=candidate,
+                    sandbox_evidence=sandbox.evidence(),
+                )
+                evidence = ResolutionCanaryPrivateCaseEvidence(
+                    result=result,
+                    baseline_output=resolution_canary_output(baseline),
+                    candidate_output=resolution_canary_output(candidate),
+                )
+                write_immutable_json(evidence_path, evidence.model_dump(mode="json"))
+            safe_results.append(evidence.result)
+            evidence_identities.append((evidence_path, file_identity(evidence_path)))
+
+        def verify_inputs() -> None:
+            for path, identity in (
+                (workset, workset_identity),
+                (workset_manifest, workset_manifest_identity),
+                (image_lock, image_lock_identity),
+                *evidence_identities,
+            ):
+                _require_unchanged_file(path, identity)
+            if (
+                file_identity(evaluator_root / "lib" / "agent" / "log_parsers.py")[0]
+                != SWE_REBENCH_LOG_PARSERS_SHA256
+                or file_identity(evaluator_root / "scripts" / "eval.py")[0]
+                != SWE_REBENCH_EVAL_SCRIPT_SHA256
+                or file_identity(evaluator_root / "lib" / "agent" / "swe_constants.py")[0]
+                != SWE_REBENCH_CONSTANTS_SHA256
+            ):
+                raise ResolutionCanaryError("pinned evaluator changed during canary execution")
+
+        def write_results(stream: BinaryIO) -> None:
+            for result in safe_results:
+                stream.write(canonical_json_bytes(result.model_dump(mode="json")))
+
+        results_result = write_immutable_stream(
+            results_output,
+            write_results,
+            before_publish=verify_inputs,
+        )
+        results_identity = _published_artifact_identity(
+            results_result.path,
+            results_result.digest,
+        )
+        failures = Counter(
+            result.reason for result in safe_results if result.status is VerificationStatus.FAIL
+        )
+        failed_count = sum(failures.values())
+        controls = tuple(result for result in safe_results if result.kind == "transfer_control")
+        requests = tuple(result for result in safe_results if result.kind == "evaluation_request")
+        execution = ResolutionCanaryExecutionManifestV1(
+            schema_version="nodelm.resolution-canary-execution/v1",
+            execution_status="PASS" if failed_count == 0 else "FAIL",
+            admission_status="PASS" if failed_count == 0 else "BLOCKED",
+            admission_blocker=None if failed_count == 0 else "canary_case_failed",
+            code_commit=code_commit,
+            recovery_manifest_sha256=workset_record.recovery_manifest_sha256,
+            workset_manifest_sha256=workset_manifest_identity[0],
+            workset_manifest_bytes=workset_manifest_identity[1],
+            workset_sha256=workset_identity[0],
+            workset_bytes=workset_identity[1],
+            image_lock_sha256=image_lock_identity[0],
+            image_lock_bytes=image_lock_identity[1],
+            evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+            evaluator_revision="c71902a8cf8d2b725f63d51f199f4d3e56f68d2d",
+            evaluator_log_parsers_sha256=parser.parser_sha256,
+            evaluator_script_sha256=parser.eval_sha256,
+            evaluator_constants_sha256=parser.constants_sha256,
+            sandbox_backend="rootless-podman",
+            sandbox_network="none",
+            sandbox_cpus_per_attempt=2,
+            sandbox_memory_per_attempt="4g",
+            results_artifact=os.path.relpath(
+                results_result.path,
+                start=manifest_output.resolve().parent,
+            ),
+            results_sha256=results_identity[0],
+            results_bytes=results_identity[1],
+            case_count=len(safe_results),
+            passed_case_count=len(safe_results) - failed_count,
+            failed_case_count=failed_count,
+            transfer_control_count=len(controls),
+            transfer_label_agreement_count=sum(
+                result.label_agreement is True for result in controls
+            ),
+            evaluation_request_count=len(requests),
+            evaluation_resolved_count=sum(result.task_resolved is True for result in requests),
+            evaluation_unresolved_count=sum(result.task_resolved is False for result in requests),
+            image_count=len(locked.images),
+            failure_counts_by_reason=dict(sorted(failures.items())),
+        )
+
+        def verify_manifest_boundary() -> None:
+            verify_inputs()
+            _require_unchanged_file(results_result.path, results_identity)
+
+        manifest_result = write_immutable_json(
+            manifest_output,
+            execution.model_dump(mode="json"),
+            before_publish=verify_manifest_boundary,
+        )
+    except (
+        OSError,
+        ResolutionCanaryError,
+        ValidationError,
+        ValueError,
+    ) as error:
+        raise typer.BadParameter(f"resolution canary execution failed: {error}") from error
+    typer.echo(
+        f"wrote results={results_result.path} cases={execution.case_count}; "
+        f"manifest={manifest_result.path} admission={execution.admission_status}"
     )
 
 

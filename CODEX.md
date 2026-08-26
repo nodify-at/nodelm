@@ -34,10 +34,11 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   by `artifacts/reports/FULL_DATASET_AUDIT.md`. One receipt-replayed real normalization canary is
   `PASS`. All seven eligible full-partition leaves have terminal evidence: four MiniMax/Qwen3.5
   leaves are `PASS`, while three Qwen3.6 leaves are truthful `FAIL` because their source resolution
-  is unknown. Resolution recovery, gold auditing, and decontamination remain `NOT RUN`. Require
-  explicit current-session authorization for recovery or re-execution into new, empty destinations
-  and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the exact evidence in
-  `docs/EXPERIMENTS.md`.
+  is unknown. Real resolution recovery is derived with zero conflicts, but its admission remains
+  `BLOCKED` pending the prepared rootless-Podman canary. Gold auditing and decontamination remain
+  `NOT RUN`. Require explicit current-session authorization for recovery or re-execution into new,
+  empty destinations and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the
+  exact evidence in `docs/EXPERIMENTS.md`.
 - Treat `complete-snapshot` as an input-scope claim: it covers all supported JSONL/Parquet data
   files discovered at the supplied local path. It does not mean the plan's Phase 0 is complete,
   and a synthetic fixture `PASS` is never a real-source audit or lineage result.

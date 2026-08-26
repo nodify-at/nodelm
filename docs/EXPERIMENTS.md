@@ -193,8 +193,34 @@ uv run --frozen --directory /workspace/nodelm/repo nodelm datasets normalize \
   43 minutes 45 seconds. The complete evidence remains outside Git under
   `/workspace/nodelm/derived/full-normalization-18c0ada5f396191d247cfe57640b6f2bb9fade86`.
 - GPU use, model loading, model execution, evaluation, and training: `NOT RUN`. Resolution-recovery
-  derivation also remains `NOT RUN`; these terminal manifests do not authorize recovered labels or
-  training admission.
+  derivation was still `NOT RUN` at this boundary; these terminal manifests do not authorize
+  recovered labels or training admission.
+
+## 2026-08-25 — real Qwen3.6 resolution-recovery derivation
+
+- Code and command: commit `74c9b505eb1a608431ae3a18a3fca5d084f2ae3b` ran the offline,
+  commit-bound `scripts/run_resolution_recovery.sh` runner against the completed persistent
+  Open-SWE snapshot and its sealed receipt.
+- Immutable inputs: Open-SWE-Traces revision
+  `ed95cef24df8d8bd79b4ceb0192cb420fde06521` and SWE-rebench V2 revision
+  `475dd5e8703bb5fb22dd3c60b5d038b019eba1e0`; the run revalidated the checked-in registry,
+  partition contract, receipt, exact labeled/target leaf files, and code commit before terminal
+  publication.
+- Result: derivation `PASS`, admission `BLOCKED` by `harness_canary_pending`. Across 179,533
+  Qwen3.6 target rows, 123,709 were ineligible, zero were already known, 3,960 had exact transfer
+  evidence, and 51,864 required evaluation. The transfer sidecar contains 1,804 unique exact keys
+  (2,545 resolved rows and 1,415 unresolved rows); the deduplicated evaluator queue contains
+  49,572 unique requests. Conflict count: zero.
+- Artifacts: exact-transfer candidates are 4,987,642 bytes with SHA-256
+  `157b8595dc48bd1b131fa76ae911c95332129474d5a281a0b6ec142789de2afa`; the evaluator queue is
+  3,550,730,380 bytes with SHA-256
+  `cd2ab196f49ab9d2e3c1a1066085a0331258868ff43258d7604f9e7746d0b569`. Private artifacts and the
+  terminal manifest remain outside Git under
+  `/workspace/nodelm/derived/resolution-recovery-74c9b505eb1a608431ae3a18a3fca5d084f2ae3b`.
+- Wall clock: `2026-08-25T21:23:50Z` through `2026-08-25T21:34:21Z`, or 10 minutes 31 seconds.
+  No stochastic seed applied; this was deterministic projection, indexing, and publication.
+- GPU use, model loading, training, and repository evaluation: `NOT RUN`. No recovered label is
+  admitted until the separately prepared canary publishes a `PASS` admission verdict.
 
 New experiment entries must include immutable input revisions, config/lock digests, commands,
 versions, seed, artifact hashes, wall-clock time, and `PASS`, `FAIL`, `NOT RUN`, `BLOCKED`, or

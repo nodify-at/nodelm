@@ -210,6 +210,33 @@ content cannot cross into either the candidate sidecar or evaluator queue.
 
 Recovery publication is immutable and records derivation separately from admission. A
 successfully derived `nodelm.resolution-recovery/v1` manifest remains admission `BLOCKED`; it is
-not permission to normalize recovered rows or train. Real recovery derivation remains `NOT RUN`,
-and no recovered label may enter downstream data until a sandboxed harness canary validates the
-transfer and evaluation path.
+not permission to normalize recovered rows or train. The real derivation completed on 2026-08-25
+and remains blocked; no recovered label may enter downstream data until a sandboxed harness
+canary validates the transfer and evaluation path.
+
+## D-020 — resolution canary separates private oracle material from admissible evidence
+
+The recovery canary deterministically covers both transferred controls and deduplicated unknown
+requests across observed languages, target partitions, and known labels. Its workset joins only
+the selected model patch to the pinned task's base commit, image, test patch, expected tests, test
+commands, and named parser; the gold solution patch is structurally absent. The workset stays
+private outside Git, while its public manifest contains only counts, strata, revisions, and
+content identities.
+
+Evaluator code is fixed to `SWE-rebench/SWE-rebench-V2` revision
+`c71902a8cf8d2b725f63d51f199f4d3e56f68d2d`, with separate SHA-256 checks for the parser and
+evaluation script plus the parser's status constants. Preparation may clone that source and pull
+only selected source image tags.
+Before execution, each tag is converted to a matching immutable repository digest. Attempts use
+only preloaded digests in rootless Podman with network disabled, dropped capabilities,
+no-new-privileges, read-only patch input, explicit CPU/memory/PID/file/output/time bounds, and
+verified forced cleanup.
+
+Every case first applies only the private test patch to reproduce the base failure, then applies
+the exact model patch plus test patch in a fresh container. A canary case fails closed on missing
+expected tests, output truncation, an invalid baseline, contradictory exit evidence, sandbox or
+cleanup failure, or transferred-label disagreement. Raw logs are retained only in private atomic
+per-case evidence; the public result retains hashes and aggregate test counts. Per-case evidence
+is restartable, but a terminal execution manifest is admission `PASS` only when every selected
+case passes and every control label agrees. That verdict validates the recovery mechanism; policy
+for disposing the full 49,572-request queue remains a separate decision.

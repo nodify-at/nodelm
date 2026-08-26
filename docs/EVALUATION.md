@@ -20,6 +20,20 @@ successful generic test-command exit is useful execution evidence, but without a
 integrity-attested oracle it remains `UNVERIFIED` and does not establish task resolution or
 regression-test integrity.
 
+Unknown-resolution recovery uses a separate SWE-rebench V2 canary contract. Its private workset
+contains the selected model patch, test patch, expected FAIL_TO_PASS/PASS_TO_PASS names, and test
+commands, but structurally excludes the dataset's gold solution patch. The evaluator source is
+pinned to `SWE-rebench/SWE-rebench-V2` revision
+`c71902a8cf8d2b725f63d51f199f4d3e56f68d2d`; its parser, evaluation script, and parser status
+constants are each verified by SHA-256. Selected task images are pulled only during preparation,
+converted to immutable
+repository digests, and then executed with implicit pulls and network access disabled. Each case
+runs a base-plus-test-patch baseline followed by the model-plus-test-patch candidate with 2 CPUs,
+4 GiB memory, PID/file/output/time limits, dropped capabilities, no-new-privileges, and forced
+cleanup. Raw logs remain private; published results retain only outcome counts and content hashes.
+Any missing test, truncated output, non-reproduced failing baseline, cleanup failure, or known-label
+disagreement fails closed. Real canary execution remains `NOT RUN`.
+
 Private evaluation is frozen at repository level before serious fine-tuning. Declared mirrors,
 exact task/patch duplicates, and measured near duplicates join the same group. Public benchmark
 overlap detection is required against the plan-named public suites before training data is

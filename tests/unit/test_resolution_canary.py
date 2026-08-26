@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from nodelm.evaluation.resolution_canary import (
     PinnedContainerImage,
+    PodmanImageLocker,
     ResolutionCanaryCase,
     ResolutionCanaryError,
     ResolutionCanaryOracle,
+    SWERebenchPodmanSandbox,
     SWERebenchTask,
     project_swe_rebench_task,
 )
@@ -105,7 +108,7 @@ def _candidate(
     )
 
 
-def _task(*, language: str = "TypeScript") -> SWERebenchTask:
+def _task(*, language: Literal["TypeScript", "JavaScript"] = "TypeScript") -> SWERebenchTask:
     return SWERebenchTask(
         task_source_revision=TASK_REVISION,
         instance_id="owner__repo-a",
@@ -202,7 +205,7 @@ def test_task_projection_keeps_private_oracle_fields_but_drops_gold_patch() -> N
         "language": "ts",
         "image_name": "docker.io/swerebenchv2/owner-repo:1-deadbee",
         "patch": "GOLD MUST NOT ENTER THE CANARY CASE",
-        "test_patch": "diff --git a/test/a.test.ts b/test/a.test.ts\n",
+        "test_patch": "\n diff --git a/test/a.test.ts b/test/a.test.ts\n\n",
         "FAIL_TO_PASS": ["fixes bug"],
         "PASS_TO_PASS": ["keeps behavior"],
         "install_config": {
@@ -215,6 +218,7 @@ def test_task_projection_keeps_private_oracle_fields_but_drops_gold_patch() -> N
 
     serialized = task.model_dump_json()
     assert task.language == "TypeScript"
+    assert task.test_patch == row["test_patch"]
     assert "test_patch" in serialized
     assert "GOLD MUST NOT ENTER" not in serialized
     assert '"patch"' not in serialized
@@ -294,3 +298,86 @@ def test_oracle_fails_closed_when_expected_tests_are_missing() -> None:
     assert result.status is VerificationStatus.FAIL
     assert result.task_resolved is None
     assert result.reason == "incomplete_expected_test_evidence"
+
+
+def test_oracle_requires_every_fail_to_pass_test_to_fail_on_the_baseline() -> None:
+    task = _task().model_copy(update={"fail_to_pass": ("fixes bug", "fixes other bug")})
+    case = build_evaluation_case(_request("a"), task)
+    result = ResolutionCanaryOracle(_parse_status_lines).evaluate(
+        case,
+        image=PinnedContainerImage(
+            source_image=case.task.image_name,
+            image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+        ),
+        baseline=_command("fixes bug:FAILED\nfixes other bug:PASSED\nkeeps behavior:PASSED"),
+        candidate=_command(
+            "fixes bug:PASSED\nfixes other bug:PASSED\nkeeps behavior:PASSED",
+            exit_code=0,
+        ),
+        sandbox_evidence={"backend": "fake"},
+    )
+
+    assert result.status is VerificationStatus.FAIL
+    assert result.reason == "failing_baseline_not_reproduced"
+
+
+def test_image_digest_selection_requires_the_source_repository() -> None:
+    selected = PodmanImageLocker._select_repo_digest(
+        "registry.example:5000/team/repo:canary",
+        '["registry.example:5000/team/repo@sha256:' + "a" * 64 + '"]',
+    )
+
+    assert selected == "registry.example:5000/team/repo@sha256:" + "a" * 64
+    with pytest.raises(ResolutionCanaryError, match="matching immutable"):
+        PodmanImageLocker._select_repo_digest(
+            "registry.example:5000/team/repo:canary",
+            '["registry.example:5000/other/repo@sha256:' + "a" * 64 + '"]',
+        )
+
+
+def test_real_repository_sandbox_command_is_offline_bounded_and_digest_pinned(
+    tmp_path: Path,
+) -> None:
+    case = build_evaluation_case(_request("a"), _task())
+    image = PinnedContainerImage(
+        source_image=case.task.image_name,
+        image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+    )
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    cidfile = tmp_path / "container.cid"
+    sandbox = SWERebenchPodmanSandbox(executable="podman")
+
+    baseline = sandbox.command(
+        case,
+        image,
+        patch_dir=patch_dir,
+        include_model_patch=False,
+        container_name="nodelm-resolution-canary-" + "a" * 24,
+        cidfile=cidfile,
+    )
+    candidate = sandbox.command(
+        case,
+        image,
+        patch_dir=patch_dir,
+        include_model_patch=True,
+        container_name="nodelm-resolution-canary-" + "b" * 24,
+        cidfile=cidfile,
+    )
+
+    assert "--network=none" in baseline
+    assert "--cap-drop=ALL" in baseline
+    assert "--security-opt=no-new-privileges" in baseline
+    assert "--pids-limit=512" in baseline
+    assert "--memory=4g" in baseline
+    assert "--cpus=2" in baseline
+    assert "--env=_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false" in baseline
+    assert image.image_digest in baseline
+    assert image.source_image not in baseline
+    volume_arguments = tuple(argument for argument in baseline if argument.startswith("--volume="))
+    assert any(argument.endswith(":/nodelm-input:ro") for argument in volume_arguments)
+    assert all(":rw" not in argument for argument in volume_arguments)
+    assert "/nodelm-input/model.patch" not in baseline[-1]
+    assert "/nodelm-input/model.patch" in candidate[-1]
+    assert case.task.base_commit in baseline[-1]
+    assert "git reset --hard HEAD" in baseline[-1]

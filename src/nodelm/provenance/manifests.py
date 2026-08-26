@@ -404,6 +404,75 @@ class ResolutionCanaryWorksetManifestV1(_ArtifactManifest):
         return self
 
 
+class ResolutionCanaryExecutionManifestV1(_ArtifactManifest):
+    schema_version: Literal["nodelm.resolution-canary-execution/v1"]
+    execution_status: TerminalStatus
+    admission_status: Literal["PASS", "BLOCKED"]
+    admission_blocker: Literal["canary_case_failed"] | None
+    code_commit: CommitSha
+    recovery_manifest_sha256: Sha256
+    workset_manifest_sha256: Sha256
+    workset_manifest_bytes: ByteCount
+    workset_sha256: Sha256
+    workset_bytes: ByteCount
+    image_lock_sha256: Sha256
+    image_lock_bytes: ByteCount
+    evaluator_repository_id: Literal["SWE-rebench/SWE-rebench-V2"]
+    evaluator_revision: Literal["c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"]
+    evaluator_log_parsers_sha256: Sha256
+    evaluator_script_sha256: Sha256
+    evaluator_constants_sha256: Sha256
+    sandbox_backend: Literal["rootless-podman"]
+    sandbox_network: Literal["none"]
+    sandbox_cpus_per_attempt: Literal[2]
+    sandbox_memory_per_attempt: Literal["4g"]
+    results_artifact: NonEmptyStr
+    results_sha256: Sha256
+    results_bytes: ByteCount
+    case_count: PositiveRowCount
+    passed_case_count: RowCount
+    failed_case_count: RowCount
+    transfer_control_count: PositiveRowCount
+    transfer_label_agreement_count: RowCount
+    evaluation_request_count: PositiveRowCount
+    evaluation_resolved_count: RowCount
+    evaluation_unresolved_count: RowCount
+    image_count: PositiveRowCount
+    failure_counts_by_reason: dict[RejectionCode, PositiveRowCount]
+
+    @model_validator(mode="after")
+    def verify_execution_accounting(self) -> ResolutionCanaryExecutionManifestV1:
+        if self.passed_case_count + self.failed_case_count != self.case_count:
+            raise ValueError("canary result counts must equal case_count")
+        if self.transfer_control_count + self.evaluation_request_count != self.case_count:
+            raise ValueError("canary kind counts must equal case_count")
+        if self.transfer_label_agreement_count > self.transfer_control_count:
+            raise ValueError("label agreements cannot exceed transfer controls")
+        if (
+            self.evaluation_resolved_count + self.evaluation_unresolved_count
+            > self.evaluation_request_count
+        ):
+            raise ValueError("evaluation outcomes cannot exceed evaluation requests")
+        if sum(self.failure_counts_by_reason.values()) != self.failed_case_count:
+            raise ValueError("failure reasons must account for every failed case")
+        expected_execution = "PASS" if self.failed_case_count == 0 else "FAIL"
+        if self.execution_status != expected_execution:
+            raise ValueError("execution status must reflect failed_case_count")
+        expected_admission = "PASS" if self.execution_status == "PASS" else "BLOCKED"
+        if self.admission_status != expected_admission:
+            raise ValueError("admission status must reflect execution status")
+        expected_blocker = None if self.admission_status == "PASS" else "canary_case_failed"
+        if self.admission_blocker != expected_blocker:
+            raise ValueError("admission blocker must reflect admission status")
+        if self.execution_status == "PASS" and (
+            self.transfer_label_agreement_count != self.transfer_control_count
+            or self.evaluation_resolved_count + self.evaluation_unresolved_count
+            != self.evaluation_request_count
+        ):
+            raise ValueError("PASS canary must resolve every case and agree with every control")
+        return self
+
+
 class NormalizationManifestV2(_ArtifactManifest):
     schema_version: Literal["nodelm.normalization-manifest/v2"]
     status: TerminalStatus
