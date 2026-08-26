@@ -53,9 +53,13 @@ _TIMING_NORMALIZE_RES = (
 _EVALUATION_OUTCOMES = frozenset({OutcomeCategory.SUCCESS, OutcomeCategory.TEST_FAILURE})
 _NUMBERED_JS_FAILURE = re.compile(r"^\s*\d+\)\s+(.+?)(?::)?\s*$")
 _JEST_CROSS_FAILURE = re.compile(r"^\s*✕\s+(.+?)\s*$")
+_JEST_FAILURE_DETAIL = re.compile(r"^\s*●\s+(.+?)\s*$")
+_JEST_FAILED_SUMMARY = re.compile(r"^Tests:\s+.*\b[1-9]\d*\s+failed\b.*$")
 _AVA_REJECTION_FAILURE = re.compile(
     r"^\s*✘\s+\[fail\]:\s+(.+?)\s+Rejected promise returned by test\s*$"
 )
+_AVA_FAILURE_DETAIL = re.compile(r"^ {2}(\S(?:.*\S)?)\s*$")
+_AVA_FAILED_SUMMARY = re.compile(r"^\s*[1-9]\d*\s+tests?\s+failed\s*$")
 
 SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
 SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
@@ -415,13 +419,32 @@ class ResolutionCanaryOracle:
                 _normalize_test_name(name)
                 for name in (*case.task.fail_to_pass, *case.task.pass_to_pass)
             }
-            for line in resolution_canary_output(result).splitlines():
+            output_lines = resolution_canary_output(result).splitlines()
+            jest_failure_details: set[str] = set()
+            ava_failure_details: set[str] = set()
+            for line in output_lines:
+                if (match := _JEST_FAILURE_DETAIL.fullmatch(line)) is not None:
+                    detail = _normalize_test_name(match.group(1))
+                    jest_failure_details.update((detail, detail.rsplit(" \u203a ", 1)[-1]))
+                elif (match := _AVA_FAILURE_DETAIL.fullmatch(line)) is not None:
+                    ava_failure_details.add(_normalize_test_name(match.group(1)))
+            has_jest_failure_summary = any(
+                _JEST_FAILED_SUMMARY.fullmatch(line) is not None for line in output_lines
+            )
+            has_ava_failure_summary = any(
+                _AVA_FAILED_SUMMARY.fullmatch(line) is not None for line in output_lines
+            )
+            for line in output_lines:
                 if (match := _NUMBERED_JS_FAILURE.fullmatch(line)) is not None:
                     name = _normalize_test_name(match.group(1).removesuffix(":"))
-                elif (match := _JEST_CROSS_FAILURE.fullmatch(line)) is not None or (
-                    match := _AVA_REJECTION_FAILURE.fullmatch(line)
-                ) is not None:
+                elif (match := _JEST_CROSS_FAILURE.fullmatch(line)) is not None:
                     name = _normalize_test_name(match.group(1))
+                    if not has_jest_failure_summary or name not in jest_failure_details:
+                        continue
+                elif (match := _AVA_REJECTION_FAILURE.fullmatch(line)) is not None:
+                    name = _normalize_test_name(match.group(1))
+                    if not has_ava_failure_summary or name not in ava_failure_details:
+                        continue
                 else:
                     continue
                 if name in expected and name not in normalized:
@@ -1081,19 +1104,32 @@ class SWERebenchSeccompChrootSandbox:
         if temporary.is_symlink() or (temporary.exists() and not temporary.is_dir()):
             raise ResolutionCanaryError("OCI temporary directory is unsafe")
         home = temporary / "nodelm-home"
-        if home.is_symlink() or (home.exists() and not home.is_dir()):
+        if home.is_symlink() or home.exists():
             raise ResolutionCanaryError("OCI sandbox home is unsafe")
-        home_corepack = home / ".cache" / "node" / "corepack"
-        if home_corepack.is_symlink() or home_corepack.exists():
-            raise ResolutionCanaryError("OCI sandbox Corepack cache destination is unsafe")
 
         self._prepare_sandbox_identity(resolved_rootfs)
         inputs = rootfs / "nodelm-input"
         inputs.mkdir(mode=0o700)
-        home.mkdir(parents=True, mode=0o700, exist_ok=True)
+        temporary.mkdir(mode=0o1777, exist_ok=True)
         temporary.chmod(0o1777)
+        home.mkdir(mode=0o700)
         if corepack_cache is not None:
-            home_corepack.parent.mkdir(parents=True)
+            home_cache = home / ".cache"
+            home_cache.mkdir(mode=0o700)
+            home_node_cache = home_cache / "node"
+            home_node_cache.mkdir(mode=0o700)
+            try:
+                resolved_home_node_cache = home_node_cache.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise ResolutionCanaryError(
+                    "OCI sandbox Corepack cache destination is unsafe"
+                ) from error
+            if (
+                not resolved_home_node_cache.is_relative_to(resolved_rootfs)
+                or resolved_home_node_cache != home_node_cache
+            ):
+                raise ResolutionCanaryError("OCI sandbox Corepack cache destination is unsafe")
+            home_corepack = home_node_cache / "corepack"
             shutil.copytree(corepack_cache, home_corepack, symlinks=True)
         devices = rootfs / "dev"
         for entry in devices.iterdir():
