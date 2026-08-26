@@ -167,7 +167,7 @@ receipt-replayed normalization canary are also `PASS`; exact evidence is in
 [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). All seven eligible full-partition leaves now have
 terminal evidence: four MiniMax/Qwen3.5 leaves are `PASS`, while three Qwen3.6 leaves are truthful
 `FAIL` because their source resolution is unknown. Real resolution recovery has completed with
-zero conflicts, but admission remains `BLOCKED` pending its prepared rootless-Podman canary.
+zero conflicts, but admission remains `BLOCKED` pending its prepared isolated repository canary.
 Gold-exposure auditing, decontamination, split and pilot construction, model execution, the
 50–100-task candidate bake-off, student selection, and training remain `NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

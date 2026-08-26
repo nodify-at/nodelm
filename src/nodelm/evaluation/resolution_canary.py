@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
@@ -48,6 +50,7 @@ _TIMING_NORMALIZE_RES = (
     re.compile(r"\s*\(\s*\d+(?:\.\d+)?\s*(?:ms|s)\s*\)\s*$", re.IGNORECASE),
 )
 _EVALUATION_OUTCOMES = frozenset({OutcomeCategory.SUCCESS, OutcomeCategory.TEST_FAILURE})
+_NUMBERED_JS_FAILURE = re.compile(r"^\s*\d+\)\s+(.+?)(?::)?\s*$")
 
 SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
 SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
@@ -241,6 +244,8 @@ class PinnedContainerImage(_StrictFrozenModel):
     schema_version: Literal["nodelm.pinned-container-image/v1"] = "nodelm.pinned-container-image/v1"
     source_image: NonEmptyStr
     image_digest: NonEmptyStr
+    runtime_artifact_sha256: Sha256 | None = None
+    runtime_artifact_bytes: int | None = Field(default=None, ge=1)
 
     @field_validator("image_digest")
     @classmethod
@@ -248,6 +253,12 @@ class PinnedContainerImage(_StrictFrozenModel):
         if _IMAGE_DIGEST.fullmatch(value) is None:
             raise ValueError("container image must be pinned by sha256 digest")
         return value
+
+    @model_validator(mode="after")
+    def require_complete_runtime_artifact_identity(self) -> PinnedContainerImage:
+        if (self.runtime_artifact_sha256 is None) != (self.runtime_artifact_bytes is None):
+            raise ValueError("runtime artifact identity must include digest and byte count")
+        return self
 
 
 class ResolutionCanaryImageLock(_StrictFrozenModel):
@@ -257,7 +268,7 @@ class ResolutionCanaryImageLock(_StrictFrozenModel):
     workset_sha256: Sha256
     evaluator_repository_id: Literal["SWE-rebench/SWE-rebench-V2"]
     evaluator_revision: CommitSha
-    runtime: Literal["rootless-podman"] = "rootless-podman"
+    runtime: Literal["rootless-podman", "seccomp-chroot"] = "rootless-podman"
     images: tuple[PinnedContainerImage, ...] = Field(min_length=1)
 
     @field_validator("evaluator_revision")
@@ -278,6 +289,18 @@ class ResolutionCanaryImageLock(_StrictFrozenModel):
         if names != tuple(sorted(names)) or len(names) != len(set(names)):
             raise ValueError("image lock source images must be unique and sorted")
         return images
+
+    @model_validator(mode="after")
+    def require_runtime_artifact_identities(self) -> ResolutionCanaryImageLock:
+        if self.runtime == "seccomp-chroot" and any(
+            image.runtime_artifact_sha256 is None for image in self.images
+        ):
+            raise ValueError("seccomp chroot images require local OCI manifest identities")
+        if self.runtime == "rootless-podman" and any(
+            image.runtime_artifact_sha256 is not None for image in self.images
+        ):
+            raise ValueError("Podman image locks must not carry local OCI identities")
+        return self
 
     def by_source_image(self) -> dict[str, PinnedContainerImage]:
         return {image.source_image: image for image in self.images}
@@ -377,11 +400,24 @@ class ResolutionCanaryOracle:
 
     def _parse(self, case: ResolutionCanaryCase, result: CommandResult) -> dict[str, str]:
         parsed = self._parser(case.task.log_parser, resolution_canary_output(result))
-        return {
+        normalized = {
             _normalize_test_name(name): status.upper()
             for name, status in parsed.items()
             if isinstance(name, str) and isinstance(status, str)
         }
+        if case.task.log_parser == "parse_log_js_4":
+            expected = {
+                _normalize_test_name(name)
+                for name in (*case.task.fail_to_pass, *case.task.pass_to_pass)
+            }
+            for line in resolution_canary_output(result).splitlines():
+                match = _NUMBERED_JS_FAILURE.fullmatch(line)
+                if match is None:
+                    continue
+                name = _normalize_test_name(match.group(1).removesuffix(":"))
+                if name in expected and name not in normalized:
+                    normalized[name] = "FAILED"
+        return normalized
 
     def evaluate(
         self,
@@ -643,6 +679,450 @@ class PodmanImageLocker:
         )
 
 
+def _image_cache_key(source_image: str) -> str:
+    return content_digest(f"nodelm.oci-image-cache/v1\0{source_image}".encode())
+
+
+class SkopeoChrootImageLocker:
+    """Pull digest-pinned images into local OCI layouts without nested namespaces."""
+
+    def __init__(
+        self,
+        *,
+        image_root: Path,
+        executable: str = "skopeo",
+        pull_timeout_seconds: float = 7_200,
+    ) -> None:
+        if not executable or "\0" in executable:
+            raise ValueError("image locker executable must be a non-empty NUL-free string")
+        if pull_timeout_seconds <= 0:
+            raise ValueError("image pull timeout must be greater than zero")
+        if not image_root.is_absolute() or image_root.is_symlink():
+            raise ValueError("OCI image root must be an absolute non-symlink path")
+        self.image_root = image_root.resolve()
+        self.executable = executable
+        self.pull_timeout_seconds = pull_timeout_seconds
+
+    def _run(
+        self,
+        executor: CommandExecutor,
+        policy: CommandPolicy,
+        command: tuple[str, ...],
+        *,
+        timeout_seconds: float,
+        max_output_bytes: int = 1024 * 1024,
+    ) -> CommandResult:
+        return executor.run(
+            policy.generic(
+                command,
+                trusted_local=True,
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=max_output_bytes,
+            )
+        )
+
+    def lock(
+        self,
+        source_images: tuple[str, ...],
+        *,
+        workspace: Path,
+        workset_sha256: str,
+    ) -> ResolutionCanaryImageLock:
+        names = tuple(sorted(set(source_images)))
+        if not names:
+            raise ResolutionCanaryError("image locking requires at least one source image")
+        self.image_root.mkdir(parents=True, exist_ok=True)
+        if self.image_root.is_symlink() or not self.image_root.is_dir():
+            raise ResolutionCanaryError("OCI image root is unsafe")
+        executor = CommandExecutor(workspace, default_max_output_bytes=1024 * 1024)
+        policy = CommandPolicy(workspace)
+        locked: list[PinnedContainerImage] = []
+        for source_image in names:
+            inspected = self._run(
+                executor,
+                policy,
+                (
+                    self.executable,
+                    "inspect",
+                    "--format",
+                    "{{.Digest}}",
+                    f"docker://{source_image}",
+                ),
+                timeout_seconds=60,
+            )
+            digest = inspected.stdout.strip()
+            if (
+                inspected.outcome is not OutcomeCategory.SUCCESS
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            ):
+                raise ResolutionCanaryError("selected canary image digest inspection failed")
+            repository = PodmanImageLocker._repository_name(source_image)
+            pinned = f"{repository}@{digest}"
+            layout = self.image_root / _image_cache_key(source_image) / "layout"
+            layout.mkdir(parents=True, exist_ok=True)
+            copied = self._run(
+                executor,
+                policy,
+                (
+                    self.executable,
+                    "copy",
+                    "--format",
+                    "oci",
+                    f"docker://{pinned}",
+                    f"oci:{layout}:canary",
+                ),
+                timeout_seconds=self.pull_timeout_seconds,
+            )
+            if copied.outcome is not OutcomeCategory.SUCCESS:
+                raise ResolutionCanaryError("selected canary OCI image pull failed")
+            raw = self._run(
+                executor,
+                policy,
+                (self.executable, "inspect", "--raw", f"oci:{layout}:canary"),
+                timeout_seconds=30,
+            )
+            if raw.outcome is not OutcomeCategory.SUCCESS or not raw.stdout:
+                raise ResolutionCanaryError("local OCI image manifest inspection failed")
+            manifest = raw.stdout.encode("utf-8")
+            locked.append(
+                PinnedContainerImage(
+                    source_image=source_image,
+                    image_digest=pinned,
+                    runtime_artifact_sha256=content_digest(manifest),
+                    runtime_artifact_bytes=len(manifest),
+                )
+            )
+        return ResolutionCanaryImageLock(
+            workset_sha256=workset_sha256,
+            evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+            evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+            runtime="seccomp-chroot",
+            images=tuple(locked),
+        )
+
+
+def _repository_workdir(task: SWERebenchTask) -> str:
+    repository_name = task.repository.rsplit("/", 1)[-1]
+    if re.fullmatch(r"[A-Za-z0-9._-]+", repository_name) is None:
+        raise ResolutionCanaryError("task repository name is unsafe for a sandbox workdir")
+    return f"/{repository_name}"
+
+
+def _attempt_script(case: ResolutionCanaryCase, *, include_model_patch: bool) -> str:
+    commands = [
+        "set -euo pipefail",
+        f'test "$(git rev-parse HEAD)" = "{case.task.base_commit}"',
+        "git reset --hard HEAD",
+    ]
+    if include_model_patch:
+        commands.append(
+            "git apply -v --3way --recount --ignore-space-change "
+            "--whitespace=nowarn /nodelm-input/model.patch"
+        )
+    commands.append(
+        "git apply -v --3way --recount --ignore-space-change "
+        "--whitespace=nowarn /nodelm-input/test.patch"
+    )
+    commands.extend(case.task.test_commands)
+    return "\n".join(commands)
+
+
+class SWERebenchSeccompChrootSandbox:
+    """Run fresh OCI rootfs clones with seccomp, chroot, UID, and resource isolation."""
+
+    def __init__(
+        self,
+        *,
+        image_root: Path,
+        skopeo: str = "skopeo",
+        umoci: str = "umoci",
+        timeout_seconds: float = 1_800,
+        max_output_bytes: int = 16 * 1024 * 1024,
+        sandbox_uid: int = 61_000,
+    ) -> None:
+        if not image_root.is_absolute() or image_root.is_symlink():
+            raise ValueError("OCI image root must be an absolute non-symlink path")
+        if any(not executable or "\0" in executable for executable in (skopeo, umoci)):
+            raise ValueError("sandbox executables must be non-empty NUL-free strings")
+        if timeout_seconds <= 0 or max_output_bytes <= 0 or sandbox_uid <= 0:
+            raise ValueError("sandbox bounds must be greater than zero")
+        self.image_root = image_root.resolve()
+        self.skopeo = skopeo
+        self.umoci = umoci
+        self.timeout_seconds = timeout_seconds
+        self.max_output_bytes = max_output_bytes
+        self.sandbox_uid = sandbox_uid
+        self._ready_bundles: dict[str, Path] = {}
+        self._manifest_probe: CommandResult | None = None
+        self._unpack: CommandResult | None = None
+        self._clone: CommandResult | None = None
+        self._cleanup_verified = False
+
+    @staticmethod
+    def _manifest_identity(result: CommandResult) -> tuple[str, int]:
+        payload = result.stdout.encode("utf-8")
+        return content_digest(payload), len(payload)
+
+    def _ensure_ready(self, workspace: Path, image: PinnedContainerImage) -> Path:
+        cached = self._ready_bundles.get(image.image_digest)
+        if cached is not None:
+            return cached
+        if image.runtime_artifact_sha256 is None or image.runtime_artifact_bytes is None:
+            raise ResolutionCanaryError("seccomp chroot image lacks a local OCI identity")
+        cache = self.image_root / _image_cache_key(image.source_image)
+        layout = cache / "layout"
+        bundle = cache / "bundle"
+        executor = CommandExecutor(workspace, default_max_output_bytes=1024 * 1024)
+        policy = CommandPolicy(workspace)
+        if not (layout / "index.json").is_file():
+            layout.mkdir(parents=True, exist_ok=True)
+            restored = executor.run(
+                policy.generic(
+                    (
+                        self.skopeo,
+                        "copy",
+                        "--format",
+                        "oci",
+                        f"docker://{image.image_digest}",
+                        f"oci:{layout}:canary",
+                    ),
+                    trusted_local=True,
+                    timeout_seconds=7_200,
+                    max_output_bytes=1024 * 1024,
+                )
+            )
+            if restored.outcome is not OutcomeCategory.SUCCESS:
+                raise ResolutionCanaryError("locked OCI image restoration failed")
+        manifest_probe = executor.run(
+            policy.generic(
+                (self.skopeo, "inspect", "--raw", f"oci:{layout}:canary"),
+                trusted_local=True,
+                timeout_seconds=30,
+                max_output_bytes=1024 * 1024,
+            )
+        )
+        self._manifest_probe = manifest_probe
+        if manifest_probe.outcome is not OutcomeCategory.SUCCESS or self._manifest_identity(
+            manifest_probe
+        ) != (image.runtime_artifact_sha256, image.runtime_artifact_bytes):
+            raise ResolutionCanaryError("local OCI image does not match its image lock")
+        marker = bundle / ".nodelm-oci-manifest"
+        if bundle.exists():
+            if (
+                bundle.is_symlink()
+                or not (bundle / "rootfs").is_dir()
+                or not (bundle / "config.json").is_file()
+                or not marker.is_file()
+                or marker.is_symlink()
+                or marker.read_text(encoding="ascii") != image.runtime_artifact_sha256
+            ):
+                raise ResolutionCanaryError("cached OCI bundle is incomplete or unsafe")
+        else:
+            cache.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".unpack-", dir=cache) as temporary_name:
+                temporary = Path(temporary_name).resolve()
+                staged = temporary / "bundle"
+                unpack = executor.run(
+                    policy.generic(
+                        (self.umoci, "unpack", "--image", f"{layout}:canary", str(staged)),
+                        trusted_local=True,
+                        timeout_seconds=1_800,
+                        max_output_bytes=1024 * 1024,
+                    )
+                )
+                self._unpack = unpack
+                if unpack.outcome is not OutcomeCategory.SUCCESS:
+                    raise ResolutionCanaryError("local OCI image unpack failed")
+                marker_path = staged / ".nodelm-oci-manifest"
+                marker_path.write_text(image.runtime_artifact_sha256, encoding="ascii")
+                staged.rename(bundle)
+        self._ready_bundles[image.image_digest] = bundle
+        return bundle
+
+    @staticmethod
+    def _image_environment(bundle: Path) -> tuple[str, ...]:
+        try:
+            value = cast(object, json.loads((bundle / "config.json").read_bytes()))
+            process = cast(dict[str, object], value).get("process")
+            environment = cast(dict[str, object], process).get("env")
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ResolutionCanaryError("OCI runtime configuration is invalid") from error
+        if not isinstance(environment, list) or any(
+            not isinstance(item, str) or "=" not in item or "\0" in item for item in environment
+        ):
+            raise ResolutionCanaryError("OCI runtime environment is invalid")
+        merged = {item.partition("=")[0]: item for item in cast(list[str], environment)}
+        merged.update(
+            {
+                "CI": "CI=true",
+                "HOME": "HOME=/tmp/nodelm-home",
+                "_JAVA_OPTIONS": "_JAVA_OPTIONS=-Djava.net.preferIPv6Addresses=false",
+            }
+        )
+        if "PATH" not in merged:
+            merged["PATH"] = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        return tuple(merged[key] for key in sorted(merged))
+
+    def _prepare_rootfs(self, rootfs: Path, case: ResolutionCanaryCase) -> str:
+        workdir = _repository_workdir(case.task)
+        repository = rootfs / workdir.removeprefix("/")
+        if repository.is_symlink() or not repository.is_dir():
+            raise ResolutionCanaryError("OCI rootfs does not contain the expected repository")
+        inputs = rootfs / "nodelm-input"
+        inputs.mkdir(mode=0o700)
+        home = rootfs / "tmp" / "nodelm-home"
+        home.mkdir(parents=True, mode=0o700, exist_ok=True)
+        (rootfs / "tmp").chmod(0o1777)
+        devices = rootfs / "dev"
+        for entry in devices.iterdir():
+            mode = entry.lstat().st_mode
+            if stat.S_ISBLK(mode) or stat.S_ISCHR(mode):
+                raise ResolutionCanaryError("OCI rootfs contains a host device node")
+        for device in ("null", "zero", "random", "urandom"):
+            path = devices / device
+            if not path.exists():
+                if device == "zero":
+                    with path.open("wb") as stream:
+                        stream.truncate(16 * 1024 * 1024)
+                elif device in {"random", "urandom"}:
+                    path.write_bytes(os.urandom(1024 * 1024))
+                else:
+                    path.touch()
+                path.chmod(0o666)
+        for parent, directories, files in os.walk(repository):
+            os.chown(parent, self.sandbox_uid, self.sandbox_uid)
+            for name in (*directories, *files):
+                os.lchown(Path(parent) / name, self.sandbox_uid, self.sandbox_uid)
+        os.chown(inputs, self.sandbox_uid, self.sandbox_uid)
+        os.chown(home, self.sandbox_uid, self.sandbox_uid)
+        return workdir
+
+    def run(
+        self,
+        case: ResolutionCanaryCase,
+        image: PinnedContainerImage,
+        *,
+        include_model_patch: bool,
+    ) -> CommandResult:
+        if os.geteuid() != 0:
+            raise ResolutionCanaryError("seccomp chroot sandbox requires a root launcher")
+        if image.source_image != case.task.image_name:
+            raise ResolutionCanaryError("pinned image does not match private task image")
+        attempt_root = self.image_root.parent / "attempts"
+        attempt_root.mkdir(parents=True, exist_ok=True)
+        bundle = self._ensure_ready(attempt_root, image)
+        with tempfile.TemporaryDirectory(
+            prefix="nodelm-resolution-canary-", dir=attempt_root
+        ) as temporary_name:
+            temporary = Path(temporary_name).resolve()
+            rootfs = temporary / "rootfs"
+            executor = CommandExecutor(temporary, default_max_output_bytes=self.max_output_bytes)
+            policy = CommandPolicy(temporary)
+            clone = executor.run(
+                policy.generic(
+                    (
+                        "cp",
+                        "-a",
+                        "--reflink=always",
+                        str(bundle / "rootfs"),
+                        str(rootfs),
+                    ),
+                    trusted_local=True,
+                    timeout_seconds=600,
+                    max_output_bytes=1024 * 1024,
+                )
+            )
+            self._clone = clone
+            if clone.outcome is not OutcomeCategory.SUCCESS:
+                raise ResolutionCanaryError("fresh OCI rootfs clone failed")
+            workdir = self._prepare_rootfs(rootfs, case)
+            inputs = rootfs / "nodelm-input"
+            if include_model_patch:
+                (inputs / "model.patch").write_text(case.model_patch, encoding="utf-8")
+            (inputs / "test.patch").write_text(case.task.test_patch, encoding="utf-8")
+            for path in inputs.iterdir():
+                os.chown(path, self.sandbox_uid, self.sandbox_uid)
+                path.chmod(0o400)
+            sched_getaffinity = getattr(os, "sched_getaffinity", None)
+            if not callable(sched_getaffinity):
+                raise ResolutionCanaryError("CPU affinity is unavailable")
+            cpus = tuple(sorted(sched_getaffinity(0))[:2])
+            if len(cpus) != 2:
+                raise ResolutionCanaryError("seccomp chroot sandbox requires two available CPUs")
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("chroot_launcher.py").resolve()),
+                "--rootfs",
+                str(rootfs),
+                "--workdir",
+                workdir,
+                "--uid",
+                str(self.sandbox_uid),
+                "--gid",
+                str(self.sandbox_uid),
+                "--cpus",
+                ",".join(str(cpu) for cpu in cpus),
+                "--memory-bytes",
+                str(4 * 1024 * 1024 * 1024),
+                "--pids",
+                "512",
+            ]
+            for item in self._image_environment(bundle):
+                command.extend(("--env", item))
+            command.extend(
+                (
+                    "--",
+                    "/bin/bash",
+                    "-lc",
+                    _attempt_script(case, include_model_patch=include_model_patch),
+                )
+            )
+            result = executor.run(
+                policy.generic(
+                    tuple(command),
+                    trusted_local=True,
+                    timeout_seconds=self.timeout_seconds,
+                    failure_outcome=OutcomeCategory.TEST_FAILURE,
+                    max_output_bytes=self.max_output_bytes,
+                )
+            )
+        self._cleanup_verified = not temporary.exists()
+        if not self._cleanup_verified:
+            return replace(
+                result,
+                outcome=OutcomeCategory.INTERNAL_FAILURE,
+                stderr=(result.stderr.rstrip() + "\nsandbox rootfs cleanup failed").lstrip(),
+            )
+        return result
+
+    def evidence(self) -> dict[str, Any]:
+        def summary(result: CommandResult | None) -> dict[str, Any] | None:
+            if result is None:
+                return None
+            return {
+                "outcome": result.outcome.value,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "stdout_truncated": result.stdout_truncated,
+                "stderr_truncated": result.stderr_truncated,
+            }
+
+        return {
+            "schema_version": "nodelm.swe-rebench-seccomp-chroot/v1",
+            "backend": "seccomp-chroot",
+            "network": "seccomp-denied",
+            "implicit_pull": False,
+            "pids_limit": 512,
+            "memory": "4g monitored aggregate and per-process address space",
+            "cpus": 2,
+            "uid": self.sandbox_uid,
+            "manifest_probe": summary(self._manifest_probe),
+            "unpack": summary(self._unpack),
+            "clone": summary(self._clone),
+            "cleanup_verified": self._cleanup_verified,
+        }
+
+
 class SWERebenchPodmanSandbox:
     """Run model-authored patches in preloaded, digest-pinned rootless Podman images."""
 
@@ -669,29 +1149,11 @@ class SWERebenchPodmanSandbox:
 
     @staticmethod
     def _repository_workdir(task: SWERebenchTask) -> str:
-        repository_name = task.repository.rsplit("/", 1)[-1]
-        if re.fullmatch(r"[A-Za-z0-9._-]+", repository_name) is None:
-            raise ResolutionCanaryError("task repository name is unsafe for a container workdir")
-        return f"/{repository_name}"
+        return _repository_workdir(task)
 
     @staticmethod
     def _script(case: ResolutionCanaryCase, *, include_model_patch: bool) -> str:
-        commands = [
-            "set -euo pipefail",
-            f'test "$(git rev-parse HEAD)" = "{case.task.base_commit}"',
-            "git reset --hard HEAD",
-        ]
-        if include_model_patch:
-            commands.append(
-                "git apply -v --3way --recount --ignore-space-change "
-                "--whitespace=nowarn /nodelm-input/model.patch"
-            )
-        commands.append(
-            "git apply -v --3way --recount --ignore-space-change "
-            "--whitespace=nowarn /nodelm-input/test.patch"
-        )
-        commands.extend(case.task.test_commands)
-        return "\n".join(commands)
+        return _attempt_script(case, include_model_patch=include_model_patch)
 
     def command(
         self,
@@ -883,7 +1345,9 @@ __all__ = [
     "ResolutionCanaryOracle",
     "ResolutionCanaryPrivateCaseEvidence",
     "SWERebenchPodmanSandbox",
+    "SWERebenchSeccompChrootSandbox",
     "SWERebenchTask",
+    "SkopeoChrootImageLocker",
     "project_swe_rebench_task",
     "resolution_canary_output",
 ]

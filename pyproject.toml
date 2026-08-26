@@ -65,6 +65,8 @@ branch = true
 source = ["nodelm"]
 omit = [
   "src/nodelm/__main__.py",
+  # Exercised by the real Linux/Runpod sandbox probe; macOS cannot chroot or load Linux seccomp.
+  "src/nodelm/evaluation/chroot_launcher.py",
   "src/nodelm/training/transformers_backend.py",
 ]
 

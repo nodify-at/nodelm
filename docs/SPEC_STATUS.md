@@ -64,7 +64,8 @@ The next gate is prepared in code but not yet executed: a small deterministic ca
 both transfer controls and previously unknown evaluation requests, joins private test material
 without gold solution patches, pins the upstream evaluator implementation and every selected
 container by digest, then runs baseline/candidate test suites sequentially in offline, bounded,
-rootless Podman sandboxes. A `PASS` canary must reproduce every failing baseline, preserve every
+rootless Podman sandboxes or restricted-host seccomp/chroot OCI rootfs clones. A `PASS` canary must
+reproduce every failing baseline, preserve every
 regression test, obtain an outcome for every sampled request, and agree with every transferred
 control label.
 

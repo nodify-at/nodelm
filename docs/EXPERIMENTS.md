@@ -222,6 +222,24 @@ uv run --frozen --directory /workspace/nodelm/repo nodelm datasets normalize \
 - GPU use, model loading, training, and repository evaluation: `NOT RUN`. No recovered label is
   admitted until the separately prepared canary publishes a `PASS` admission verdict.
 
+## 2026-08-26 — restricted Runpod sandbox compatibility probe
+
+- Environment: the x86_64 Runpod CPU pod exposed 256 CPUs and 2 TiB RAM, but its outer seccomp
+  policy rejected both rootless and rootful nested namespaces with `Operation not permitted`.
+  Rootless Podman therefore could not satisfy the canary contract on this host.
+- Fallback verification: `skopeo` pinned and converted one selected public image,
+  `docker.io/swerebenchv2/eslint-doctrine@sha256:fd70e9c17a3b65c5588fd4178ece3f7a642705924fa08fc4728c047aaaab5c31`.
+  Its converted local OCI manifest was 2,135 bytes with SHA-256
+  `e864b49a35c8d9c6702e7749bd9f49d22cffffe2f77d6215ea3810c08995524b`.
+- Real control result: case
+  `34b691a7b91bb4303cdc82cc589a697962521738a859af3b236f284bb100a8c5` reproduced the
+  baseline failure, observed all 240 expected tests in both attempts, passed the patched candidate,
+  and agreed with its transferred `resolved=true` label. A direct launcher probe ran as UID 61000
+  and an outbound IPv4 socket attempt returned `Operation not permitted`.
+- Scope: this was a manual compatibility probe, not retained terminal evidence and not an admission
+  result. The complete 12-case canary remains `NOT RUN` until the commit-bound runner publishes its
+  immutable execution manifest.
+
 New experiment entries must include immutable input revisions, config/lock digests, commands,
 versions, seed, artifact hashes, wall-clock time, and `PASS`, `FAIL`, `NOT RUN`, `BLOCKED`, or
 `UNVERIFIED` per check.

@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 # Materialize and execute the provenance-bound resolution canary on persistent storage.
-# Run this as an unprivileged user with rootless Podman. Image/evaluator preparation may use
-# outbound network access; every repository test attempt is forced to --network=none.
+# Use an unprivileged user with rootless Podman or root with the seccomp/chroot backend.
+# Image/evaluator preparation may use outbound network access; repository tests cannot.
 
 REPO_ROOT="${NODELM_REPO_ROOT:-/workspace/nodelm/repo}"
 PERSIST_ROOT="${NODELM_PERSIST_ROOT:-/workspace/nodelm}"
@@ -17,6 +17,8 @@ TASK_RECEIPT="${NODELM_TASK_RECEIPT:-${PERSIST_ROOT}/receipts/swe-rebench-v2.tra
 EVALUATOR_REVISION='c71902a8cf8d2b725f63d51f199f4d3e56f68d2d'
 EVALUATOR_URL="${NODELM_EVALUATOR_URL:-https://github.com/SWE-rebench/SWE-rebench-V2.git}"
 EVALUATOR_ROOT="${NODELM_EVALUATOR_ROOT:-${PERSIST_ROOT}/evaluators/SWE-rebench-V2-${EVALUATOR_REVISION}}"
+CANARY_RUNTIME="${NODELM_CANARY_RUNTIME:-rootless-podman}"
+IMAGE_ROOT="${NODELM_IMAGE_ROOT:-/var/lib/nodelm-canary/images}"
 
 export UV_OFFLINE=1
 export UV_CACHE_DIR="${NODELM_UV_CACHE_DIR:-${PERSIST_ROOT}/cache/uv}"
@@ -107,10 +109,12 @@ stop_active_process_group() {
   fi
   ACTIVE_PID=""
   ACTIVE_PGID=""
-  while IFS= read -r container_id; do
-    [[ -n "${container_id}" ]] || continue
-    podman rm --force --ignore --time=0 -- "${container_id}" >/dev/null 2>&1 || true
-  done < <(podman ps --all --quiet --filter label=io.nodelm.resolution-canary=true 2>/dev/null)
+  if [[ "${CANARY_RUNTIME}" == "rootless-podman" ]]; then
+    while IFS= read -r container_id; do
+      [[ -n "${container_id}" ]] || continue
+      podman rm --force --ignore --time=0 -- "${container_id}" >/dev/null 2>&1 || true
+    done < <(podman ps --all --quiet --filter label=io.nodelm.resolution-canary=true 2>/dev/null)
+  fi
 }
 
 on_signal() {
@@ -289,6 +293,8 @@ if file_identity(workset) != (workset_record.workset_sha256, workset_record.work
     raise SystemExit("terminal workset identity mismatch")
 if lock.workset_sha256 != workset_record.workset_sha256:
     raise SystemExit("terminal image lock identity mismatch")
+if execution.sandbox_backend != lock.runtime:
+    raise SystemExit("terminal image lock/runtime mismatch")
 if file_identity(results) != (execution.results_sha256, execution.results_bytes):
     raise SystemExit("terminal result identity mismatch")
 if execution.workset_manifest_sha256 != file_identity(workset_manifest)[0]:
@@ -325,9 +331,24 @@ require_command mktemp
 require_command sha256sum
 require_command flock
 require_command setsid
-require_command podman
 require_command "${UV_BIN}"
-[[ "${EUID}" -ne 0 ]] || fail "resolution canary must run as an unprivileged user"
+case "${CANARY_RUNTIME}" in
+rootless-podman)
+  require_command podman
+  [[ "${EUID}" -ne 0 ]] || fail "rootless Podman canary must run as an unprivileged user"
+  ;;
+seccomp-chroot)
+  require_command skopeo
+  require_command umoci
+  require_command cp
+  [[ "${EUID}" -eq 0 ]] || fail "seccomp chroot canary requires a root launcher"
+  [[ "${IMAGE_ROOT}" == /* && "${IMAGE_ROOT}" != "/" ]] || fail \
+    "NODELM_IMAGE_ROOT must be an absolute, non-root directory"
+  ;;
+*)
+  fail "unsupported NODELM_CANARY_RUNTIME"
+  ;;
+esac
 require_regular_file "${REPO_ROOT}/pyproject.toml"
 require_regular_file "${REPO_ROOT}/uv.lock"
 require_regular_file "${RECOVERY_DIR}/resolution-recovery.manifest.json"
@@ -386,21 +407,51 @@ fi
 
 check_stop
 CURRENT_PHASE="materialize"
-write_state "RUNNING" "materializing provenance-bound private workset"
-run_active "materializing private canary workset" \
-  "${UV_BIN}" run --frozen --no-sync --directory "${EXEC_ROOT}" python -m nodelm datasets \
-  build-resolution-canary-workset \
-  --recovery-manifest "${RECOVERY_MANIFEST}" \
-  --candidates "${CANDIDATES}" \
-  --queue "${QUEUE}" \
-  --trace-snapshot "${TRACE_SNAPSHOT}" \
-  --trace-transfer-receipt "${TRACE_RECEIPT}" \
-  --partition-contract "${PARTITION_CONTRACT}" \
-  --task-snapshot "${TASK_SNAPSHOT}" \
-  --task-transfer-receipt "${TASK_RECEIPT}" \
-  --workset-output "${WORKSET}" \
-  --manifest-output "${WORKSET_MANIFEST}" \
-  --config "${REGISTRY}"
+if [[ -f "${WORKSET}" && ! -L "${WORKSET}" && -f "${WORKSET_MANIFEST}" &&
+  ! -L "${WORKSET_MANIFEST}" ]]; then
+  run_python - "${WORKSET}" "${WORKSET_MANIFEST}" <<'PY'
+import sys
+from pathlib import Path
+
+from nodelm.artifacts import file_identity
+from nodelm.evaluation.resolution_canary import ResolutionCanaryCase
+from nodelm.provenance.manifests import ResolutionCanaryWorksetManifestV1
+
+workset, manifest_path = map(Path, sys.argv[1:])
+manifest = ResolutionCanaryWorksetManifestV1.model_validate_json(manifest_path.read_bytes())
+try:
+    cases = tuple(
+        ResolutionCanaryCase.model_validate_json(line)
+        for line in workset.read_text(encoding="utf-8").splitlines()
+    )
+except ValueError:
+    raise SystemExit("existing private workset failed schema validation") from None
+if file_identity(workset) != (manifest.workset_sha256, manifest.workset_bytes):
+    raise SystemExit("existing private workset identity mismatch")
+if len(cases) != manifest.case_count:
+    raise SystemExit("existing private workset accounting mismatch")
+PY
+  log_event "REUSE phase=materialize artifact=${WORKSET}"
+elif [[ -e "${WORKSET}" || -L "${WORKSET}" || -e "${WORKSET_MANIFEST}" ||
+  -L "${WORKSET_MANIFEST}" ]]; then
+  fail "partial or unsafe workset artifacts require operator review"
+else
+  write_state "RUNNING" "materializing provenance-bound private workset"
+  run_active "materializing private canary workset" \
+    "${UV_BIN}" run --frozen --no-sync --directory "${EXEC_ROOT}" python -m nodelm datasets \
+    build-resolution-canary-workset \
+    --recovery-manifest "${RECOVERY_MANIFEST}" \
+    --candidates "${CANDIDATES}" \
+    --queue "${QUEUE}" \
+    --trace-snapshot "${TRACE_SNAPSHOT}" \
+    --trace-transfer-receipt "${TRACE_RECEIPT}" \
+    --partition-contract "${PARTITION_CONTRACT}" \
+    --task-snapshot "${TASK_SNAPSHOT}" \
+    --task-transfer-receipt "${TASK_RECEIPT}" \
+    --workset-output "${WORKSET}" \
+    --manifest-output "${WORKSET_MANIFEST}" \
+    --config "${REGISTRY}"
+fi
 require_inputs_unchanged
 
 check_stop
@@ -410,13 +461,34 @@ prepare_evaluator
 
 check_stop
 CURRENT_PHASE="pull_images"
-write_state "RUNNING" "pulling selected canary images and recording immutable digests"
-run_active "locking selected canary image digests" \
-  "${UV_BIN}" run --frozen --no-sync --directory "${EXEC_ROOT}" python -m nodelm datasets \
-  lock-resolution-canary-images \
-  --workset "${WORKSET}" \
-  --workset-manifest "${WORKSET_MANIFEST}" \
-  --output "${IMAGE_LOCK}"
+if [[ -f "${IMAGE_LOCK}" && ! -L "${IMAGE_LOCK}" ]]; then
+  run_python - "${WORKSET}" "${IMAGE_LOCK}" "${CANARY_RUNTIME}" <<'PY'
+import sys
+from pathlib import Path
+
+from nodelm.artifacts import file_identity
+from nodelm.evaluation.resolution_canary import ResolutionCanaryImageLock
+
+workset, image_lock = map(Path, sys.argv[1:3])
+runtime = sys.argv[3]
+lock = ResolutionCanaryImageLock.model_validate_json(image_lock.read_bytes())
+if lock.workset_sha256 != file_identity(workset)[0] or lock.runtime != runtime:
+    raise SystemExit("existing image lock does not match workset and runtime")
+PY
+  log_event "REUSE phase=pull_images artifact=${IMAGE_LOCK}"
+elif [[ -e "${IMAGE_LOCK}" || -L "${IMAGE_LOCK}" ]]; then
+  fail "unsafe image lock requires operator review"
+else
+  write_state "RUNNING" "pulling selected canary images and recording immutable digests"
+  run_active "locking selected canary image digests" \
+    "${UV_BIN}" run --frozen --no-sync --directory "${EXEC_ROOT}" python -m nodelm datasets \
+    lock-resolution-canary-images \
+    --workset "${WORKSET}" \
+    --workset-manifest "${WORKSET_MANIFEST}" \
+    --output "${IMAGE_LOCK}" \
+    --runtime "${CANARY_RUNTIME}" \
+    --image-root "${IMAGE_ROOT}"
+fi
 require_inputs_unchanged
 
 check_stop
@@ -433,7 +505,8 @@ run_active "executing offline canary cases" \
   --case-evidence-dir "${CASE_EVIDENCE_DIR}" \
   --results-output "${RESULTS}" \
   --manifest-output "${EXECUTION_MANIFEST}" \
-  --code-commit "${HEAD_COMMIT}"
+  --code-commit "${HEAD_COMMIT}" \
+  --image-root "${IMAGE_ROOT}"
 require_inputs_unchanged
 
 CURRENT_PHASE="validate"

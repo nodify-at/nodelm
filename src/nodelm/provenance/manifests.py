@@ -422,7 +422,7 @@ class ResolutionCanaryExecutionManifestV1(_ArtifactManifest):
     evaluator_log_parsers_sha256: Sha256
     evaluator_script_sha256: Sha256
     evaluator_constants_sha256: Sha256
-    sandbox_backend: Literal["rootless-podman"]
+    sandbox_backend: Literal["rootless-podman", "seccomp-chroot"]
     sandbox_network: Literal["none"]
     sandbox_cpus_per_attempt: Literal[2]
     sandbox_memory_per_attempt: Literal["4g"]

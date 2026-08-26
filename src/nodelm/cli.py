@@ -89,7 +89,9 @@ from nodelm.evaluation.resolution_canary import (
     ResolutionCanaryImageLock,
     ResolutionCanaryOracle,
     ResolutionCanaryPrivateCaseEvidence,
+    SkopeoChrootImageLocker,
     SWERebenchPodmanSandbox,
+    SWERebenchSeccompChrootSandbox,
     SWERebenchTask,
     project_swe_rebench_task,
     resolution_canary_output,
@@ -1527,7 +1529,10 @@ def datasets_lock_resolution_canary_images(
     workset: Path = typer.Option(..., "--workset", exists=True, dir_okay=False),
     workset_manifest: Path = typer.Option(..., "--workset-manifest", exists=True, dir_okay=False),
     output: Path = typer.Option(..., "--output", dir_okay=False),
+    runtime: str = typer.Option("rootless-podman", "--runtime"),
     podman: str = typer.Option("podman", "--podman"),
+    skopeo: str = typer.Option("skopeo", "--skopeo"),
+    image_root: Path = typer.Option(Path("/var/lib/nodelm-canary/images"), "--image-root"),
 ) -> None:
     """Pull only selected canary images and publish immutable digest pins."""
 
@@ -1537,7 +1542,14 @@ def datasets_lock_resolution_canary_images(
             workset_manifest,
         )
         output.resolve().parent.mkdir(parents=True, exist_ok=True)
-        lock = PodmanImageLocker(executable=podman).lock(
+        locker: PodmanImageLocker | SkopeoChrootImageLocker
+        if runtime == "rootless-podman":
+            locker = PodmanImageLocker(executable=podman)
+        elif runtime == "seccomp-chroot":
+            locker = SkopeoChrootImageLocker(image_root=image_root, executable=skopeo)
+        else:
+            raise ResolutionCanaryError("unsupported resolution canary runtime")
+        lock = locker.lock(
             tuple(case.task.image_name for case in cases),
             workspace=output.resolve().parent,
             workset_sha256=workset_identity[0],
@@ -1588,6 +1600,9 @@ def datasets_run_resolution_canary(
     manifest_output: Path = typer.Option(..., "--manifest-output", dir_okay=False),
     code_commit: str = typer.Option(..., "--code-commit"),
     podman: str = typer.Option("podman", "--podman"),
+    skopeo: str = typer.Option("skopeo", "--skopeo"),
+    umoci: str = typer.Option("umoci", "--umoci"),
+    image_root: Path = typer.Option(Path("/var/lib/nodelm-canary/images"), "--image-root"),
 ) -> None:
     """Run the private real-repository canary with offline, bounded containers."""
 
@@ -1608,7 +1623,15 @@ def datasets_run_resolution_canary(
 
         parser = PinnedEvaluatorLogParser(evaluator_root)
         oracle = ResolutionCanaryOracle(parser)
-        sandbox = SWERebenchPodmanSandbox(executable=podman)
+        sandbox: SWERebenchPodmanSandbox | SWERebenchSeccompChrootSandbox
+        if locked.runtime == "rootless-podman":
+            sandbox = SWERebenchPodmanSandbox(executable=podman)
+        else:
+            sandbox = SWERebenchSeccompChrootSandbox(
+                image_root=image_root,
+                skopeo=skopeo,
+                umoci=umoci,
+            )
         case_evidence_dir.mkdir(parents=True, exist_ok=True)
         if case_evidence_dir.is_symlink() or not case_evidence_dir.is_dir():
             raise ResolutionCanaryError("private case evidence directory is unsafe")
@@ -1704,7 +1727,7 @@ def datasets_run_resolution_canary(
             evaluator_log_parsers_sha256=parser.parser_sha256,
             evaluator_script_sha256=parser.eval_sha256,
             evaluator_constants_sha256=parser.constants_sha256,
-            sandbox_backend="rootless-podman",
+            sandbox_backend=locked.runtime,
             sandbox_network="none",
             sandbox_cpus_per_attempt=2,
             sandbox_memory_per_attempt="4g",

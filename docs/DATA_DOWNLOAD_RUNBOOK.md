@@ -107,16 +107,25 @@ execution is a separate later operation on a container-capable CPU host.
 
 The canary is a sequential CPU workload; it needs no GPU and does not download any dataset. It
 does need outbound network during preparation to clone the already-pinned public evaluator and
-pull only the selected task images. Repository test containers then run with `--network=none`.
-Use an x86_64 Linux host with the existing `/workspace` persistent mount, at least 16 host CPUs,
-64 GiB RAM, ample temporary container storage, and rootless Podman with working user namespaces,
-cgroup v2 resource delegation, `fuse-overlayfs`, and `slirp4netns`. Run as an unprivileged user;
-the runner deliberately rejects root.
+pull only the selected task images. Repository tests then run without network access. Use an x86_64
+Linux host with the existing `/workspace` persistent mount, at least 16 host CPUs, 64 GiB RAM, and
+ample local temporary storage. The default backend requires rootless Podman, user namespaces,
+cgroup resource delegation, `fuse-overlayfs`, and `slirp4netns`, and must run unprivileged.
+
+Runpod pods currently prohibit the nested namespaces needed by Podman. On those restricted hosts,
+install `skopeo`, `umoci`, and `libseccomp2`, then select `seccomp-chroot` and run as root. This
+backend binds the public registry digest to a locally hashed OCI manifest and gives each attempt a
+fresh reflinked rootfs, dedicated numeric UID, chroot, no-new-privileges, dropped capability bounds,
+network-denying seccomp filter, two-CPU affinity, monitored 4 GiB memory/512-process bounds, file and
+output limits, timeout, and verified cleanup. OCI layers and rootfs clones stay on ephemeral local
+storage; private worksets, evidence, state, and manifests stay under persistent `/workspace`.
 
 After checking out the requested canary commit cleanly at `/workspace/nodelm/repo`, launch:
 
 ```bash
 mkdir -p /workspace/nodelm/logs
+NODELM_CANARY_RUNTIME=seccomp-chroot \
+NODELM_IMAGE_ROOT=/var/lib/nodelm-canary/images \
 nohup bash /workspace/nodelm/repo/scripts/run_resolution_canary.sh \
   >/workspace/nodelm/logs/resolution-canary.launch.log 2>&1 &
 ```
@@ -132,8 +141,9 @@ tail -n 50 "${NODELM_CANARY_DIR}/events.log"
 
 Before evaluation begins, request a clean stop with `touch "${NODELM_CANARY_DIR}/STOP"`. During
 image pulling or evaluation, read `pid=` from `run.state` and send TERM; the runner stops its
-active process group, force-cleans labeled canary containers, and records `STOPPED`. Per-case
-private evidence is immutable and restartable, so a same-commit restart reuses completed cases.
+active process group, cleans the active sandbox, and records `STOPPED`. Per-case private evidence
+is immutable and restartable, so a same-commit restart reuses completed cases. Workset and image-lock
+publication are also safely reusable after an interruption.
 Terminal `COMPLETE` means all artifacts and raw-log hashes validated; read
 `resolution-canary.execution.manifest.json` for the separate execution and admission verdicts.
 

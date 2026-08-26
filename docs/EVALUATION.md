@@ -26,13 +26,17 @@ commands, but structurally excludes the dataset's gold solution patch. The evalu
 pinned to `SWE-rebench/SWE-rebench-V2` revision
 `c71902a8cf8d2b725f63d51f199f4d3e56f68d2d`; its parser, evaluation script, and parser status
 constants are each verified by SHA-256. Selected task images are pulled only during preparation,
-converted to immutable
-repository digests, and then executed with implicit pulls and network access disabled. Each case
-runs a base-plus-test-patch baseline followed by the model-plus-test-patch candidate with 2 CPUs,
-4 GiB memory, PID/file/output/time limits, dropped capabilities, no-new-privileges, and forced
-cleanup. Raw logs remain private; published results retain only outcome counts and content hashes.
-Any missing test, truncated output, non-reproduced failing baseline, cleanup failure, or known-label
-disagreement fails closed. Real canary execution remains `NOT RUN`.
+converted to immutable repository digests, and then executed with implicit pulls and network access
+disabled. The primary backend is rootless Podman. Restricted Runpod hosts that prohibit nested
+namespaces use a fresh reflinked OCI rootfs per attempt, chroot, a dedicated numeric UID, dropped
+capability bounds, no-new-privileges, a network-denying seccomp filter, CPU affinity, monitored
+memory/process limits, file/output/time bounds, and verified cleanup. Each case runs a
+base-plus-test-patch baseline followed by the model-plus-test-patch candidate. Raw logs remain
+private; published results retain only outcome counts and content hashes. Any missing test,
+truncated output, non-reproduced failing baseline, cleanup failure, or known-label disagreement
+fails closed. For the pinned `parse_log_js_4`, an exact numbered failure line may fill only an
+otherwise missing expected test; it never overrides parser evidence. Real canary execution remains
+`NOT RUN`.
 
 Private evaluation is frozen at repository level before serious fine-tuning. Declared mirrors,
 exact task/patch duplicates, and measured near duplicates join the same group. Public benchmark

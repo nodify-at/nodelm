@@ -35,7 +35,7 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   `PASS`. All seven eligible full-partition leaves have terminal evidence: four MiniMax/Qwen3.5
   leaves are `PASS`, while three Qwen3.6 leaves are truthful `FAIL` because their source resolution
   is unknown. Real resolution recovery is derived with zero conflicts, but its admission remains
-  `BLOCKED` pending the prepared rootless-Podman canary. Gold auditing and decontamination remain
+  `BLOCKED` pending the prepared isolated repository canary. Gold auditing and decontamination remain
   `NOT RUN`. Require explicit current-session authorization for recovery or re-execution into new,
   empty destinations and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the
   exact evidence in `docs/EXPERIMENTS.md`.

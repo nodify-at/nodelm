@@ -6,12 +6,16 @@ from typing import Literal
 import pytest
 
 from nodelm.evaluation.resolution_canary import (
+    SWE_REBENCH_EVALUATOR_REVISION,
     PinnedContainerImage,
     PodmanImageLocker,
     ResolutionCanaryCase,
     ResolutionCanaryError,
+    ResolutionCanaryImageLock,
     ResolutionCanaryOracle,
+    SkopeoChrootImageLocker,
     SWERebenchPodmanSandbox,
+    SWERebenchSeccompChrootSandbox,
     SWERebenchTask,
     project_swe_rebench_task,
 )
@@ -321,6 +325,31 @@ def test_oracle_requires_every_fail_to_pass_test_to_fail_on_the_baseline() -> No
     assert result.reason == "failing_baseline_not_reproduced"
 
 
+def test_oracle_recovers_exact_numbered_failures_omitted_by_pinned_js_parser() -> None:
+    task = _task().model_copy(update={"log_parser": "parse_log_js_4"})
+    case = build_evaluation_case(_request("a"), task)
+
+    def pinned_like_parser(_name: str, output: str) -> dict[str, str]:
+        parsed = {"keeps behavior": "PASSED"}
+        if "✓ fixes bug" in output:
+            parsed["fixes bug"] = "PASSED"
+        return parsed
+
+    result = ResolutionCanaryOracle(pinned_like_parser).evaluate(
+        case,
+        image=PinnedContainerImage(
+            source_image=case.task.image_name,
+            image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+        ),
+        baseline=_command("  1) fixes bug\n  ✓ keeps behavior\n  2) keeps behavior"),
+        candidate=_command("  ✓ fixes bug\n  ✓ keeps behavior", exit_code=0),
+        sandbox_evidence={"backend": "fake"},
+    )
+
+    assert result.status is VerificationStatus.PASS
+    assert result.task_resolved is True
+
+
 def test_image_digest_selection_requires_the_source_repository() -> None:
     selected = PodmanImageLocker._select_repo_digest(
         "registry.example:5000/team/repo:canary",
@@ -333,6 +362,78 @@ def test_image_digest_selection_requires_the_source_repository() -> None:
             "registry.example:5000/team/repo:canary",
             '["registry.example:5000/other/repo@sha256:' + "a" * 64 + '"]',
         )
+
+
+def test_seccomp_chroot_image_lock_requires_local_oci_manifest_identity() -> None:
+    image = PinnedContainerImage(
+        source_image="docker.io/swerebenchv2/owner-repo:fixture",
+        image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+    )
+
+    with pytest.raises(ValueError, match="local OCI manifest"):
+        ResolutionCanaryImageLock(
+            workset_sha256="a" * 64,
+            evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+            evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+            runtime="seccomp-chroot",
+            images=(image,),
+        )
+
+    pinned = image.model_copy(
+        update={"runtime_artifact_sha256": "f" * 64, "runtime_artifact_bytes": 2_135}
+    )
+    lock = ResolutionCanaryImageLock(
+        workset_sha256="a" * 64,
+        evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+        evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+        runtime="seccomp-chroot",
+        images=(pinned,),
+    )
+    assert lock.runtime == "seccomp-chroot"
+    with pytest.raises(ValueError, match="Podman image locks"):
+        ResolutionCanaryImageLock(
+            workset_sha256="a" * 64,
+            evaluator_repository_id="SWE-rebench/SWE-rebench-V2",
+            evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+            images=(pinned,),
+        )
+
+
+def test_oci_runtime_configuration_rejects_unsafe_paths_and_bounds(tmp_path: Path) -> None:
+    SkopeoChrootImageLocker(image_root=tmp_path)
+    SWERebenchSeccompChrootSandbox(image_root=tmp_path)
+
+    with pytest.raises(ValueError, match="absolute non-symlink"):
+        SkopeoChrootImageLocker(image_root=Path("relative"))
+    with pytest.raises(ValueError, match="non-empty NUL-free"):
+        SkopeoChrootImageLocker(image_root=tmp_path, executable="")
+    with pytest.raises(ValueError, match="greater than zero"):
+        SkopeoChrootImageLocker(image_root=tmp_path, pull_timeout_seconds=0)
+    with pytest.raises(ValueError, match="non-empty NUL-free"):
+        SWERebenchSeccompChrootSandbox(image_root=tmp_path, skopeo="")
+    with pytest.raises(ValueError, match="greater than zero"):
+        SWERebenchSeccompChrootSandbox(image_root=tmp_path, sandbox_uid=0)
+
+    linked = tmp_path / "linked"
+    linked.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="absolute non-symlink"):
+        SWERebenchSeccompChrootSandbox(image_root=linked)
+
+
+def test_seccomp_chroot_preserves_image_environment_with_safe_overrides(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "config.json").write_text(
+        '{"process":{"env":["PATH=/custom/bin","HOME=/root","FEATURE=yes"]}}',
+        encoding="utf-8",
+    )
+
+    environment = SWERebenchSeccompChrootSandbox._image_environment(bundle)
+
+    assert "PATH=/custom/bin" in environment
+    assert "FEATURE=yes" in environment
+    assert "HOME=/tmp/nodelm-home" in environment
+    assert "CI=true" in environment
 
 
 def test_real_repository_sandbox_command_is_offline_bounded_and_digest_pinned(

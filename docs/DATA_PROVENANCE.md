@@ -48,7 +48,7 @@ The normalization flow is:
    manifest remains non-admitting. Before downstream use, a separate private canary workset joins
    selected cases to test patches and expected tests, explicitly drops the gold solution patch,
    pins evaluator source and container digests, reproduces failing baselines, and validates known
-   transfer labels in offline rootless containers.
+   transfer labels in offline rootless containers or fresh seccomp/chroot OCI rootfs clones.
 8. Index task statements plus reference and generated patches only inside the disk-backed split
    gate. Exact and measured near matches form connected repository groups alongside declared
    mirrors/forks.

@@ -228,9 +228,12 @@ Evaluator code is fixed to `SWE-rebench/SWE-rebench-V2` revision
 evaluation script plus the parser's status constants. Preparation may clone that source and pull
 only selected source image tags.
 Before execution, each tag is converted to a matching immutable repository digest. Attempts use
-only preloaded digests in rootless Podman with network disabled, dropped capabilities,
-no-new-privileges, read-only patch input, explicit CPU/memory/PID/file/output/time bounds, and
-verified forced cleanup.
+only preloaded digests. The primary rootless-Podman backend disables network, drops capabilities,
+sets no-new-privileges, mounts patch input read-only, applies explicit CPU/memory/PID/file/output/
+time bounds, and verifies forced cleanup. Restricted hosts that prohibit nested namespaces use
+converted OCI layouts bound by local manifest hashes, a fresh reflinked rootfs per attempt, chroot
+plus a dedicated numeric UID, a network-denying seccomp filter, equivalent resource bounds, and
+verified rootfs cleanup.
 
 Every case first applies only the private test patch to reproduce the base failure, then applies
 the exact model patch plus test patch in a fresh container. A canary case fails closed on missing
@@ -240,3 +243,8 @@ per-case evidence; the public result retains hashes and aggregate test counts. P
 is restartable, but a terminal execution manifest is admission `PASS` only when every selected
 case passes and every control label agrees. That verdict validates the recovery mechanism; policy
 for disposing the full 49,572-request queue remains a separate decision.
+
+The pinned `parse_log_js_4` does not recognize Mocha's numbered failure lines. The canary may
+conservatively add `FAILED` only when such a line exactly names an expected test missing from the
+pinned parser result; existing parser evidence always wins. This preserves ambiguous duplicate
+names while retaining the pinned parser as the primary oracle.
