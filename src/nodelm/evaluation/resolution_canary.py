@@ -957,13 +957,7 @@ class SWERebenchSeccompChrootSandbox:
         return tuple(merged[key] for key in sorted(merged))
 
     @staticmethod
-    def _image_workdir(bundle: Path) -> str:
-        try:
-            value = cast(object, json.loads((bundle / "config.json").read_bytes()))
-            process = cast(dict[str, object], value).get("process")
-            workdir = cast(dict[str, object], process).get("cwd")
-        except (AttributeError, TypeError, ValueError) as error:
-            raise ResolutionCanaryError("OCI runtime working directory is invalid") from error
+    def _validated_workdir(workdir: object) -> str:
         if (
             not isinstance(workdir, str)
             or "\0" in workdir
@@ -974,10 +968,42 @@ class SWERebenchSeccompChrootSandbox:
             raise ResolutionCanaryError("OCI runtime working directory is invalid")
         return workdir
 
+    @classmethod
+    def _image_workdir(cls, bundle: Path) -> str:
+        try:
+            value = cast(object, json.loads((bundle / "config.json").read_bytes()))
+            process = cast(dict[str, object], value).get("process")
+            workdir = cast(dict[str, object], process).get("cwd")
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ResolutionCanaryError("OCI runtime working directory is invalid") from error
+        return cls._validated_workdir(workdir)
+
     def _prepare_rootfs(self, rootfs: Path, workdir: str) -> None:
-        repository = rootfs / workdir.removeprefix("/")
-        if repository.is_symlink() or not repository.is_dir():
+        workdir = self._validated_workdir(workdir)
+        try:
+            resolved_rootfs = rootfs.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ResolutionCanaryError("OCI rootfs is missing or unsafe") from error
+        if rootfs.is_symlink() or not resolved_rootfs.is_dir():
+            raise ResolutionCanaryError("OCI rootfs is missing or unsafe")
+        repository = resolved_rootfs
+        for part in workdir.split("/")[1:]:
+            repository /= part
+            if repository.is_symlink():
+                raise ResolutionCanaryError("OCI repository workdir contains a symlink")
+        try:
+            resolved_repository = repository.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ResolutionCanaryError(
+                "OCI rootfs does not contain the expected repository"
+            ) from error
+        if (
+            not resolved_repository.is_relative_to(resolved_rootfs)
+            or resolved_repository != repository
+            or not resolved_repository.is_dir()
+        ):
             raise ResolutionCanaryError("OCI rootfs does not contain the expected repository")
+        repository = resolved_repository
         inputs = rootfs / "nodelm-input"
         inputs.mkdir(mode=0o700)
         home = rootfs / "tmp" / "nodelm-home"

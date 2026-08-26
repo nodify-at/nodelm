@@ -465,6 +465,31 @@ def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
     assert (rootfs / "tmp" / "nodelm-home").is_dir()
 
 
+def test_seccomp_chroot_rejects_intermediate_workdir_symlinks_before_chown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    outside = tmp_path / "outside"
+    (rootfs / "dev").mkdir(parents=True)
+    (outside / "repository").mkdir(parents=True)
+    (rootfs / "escape").symlink_to(outside, target_is_directory=True)
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="symlink"):
+        sandbox._prepare_rootfs(rootfs, "/escape/repository")
+
+    assert chown_calls == []
+
+
 def test_real_repository_sandbox_command_is_offline_bounded_and_digest_pinned(
     tmp_path: Path,
 ) -> None:
