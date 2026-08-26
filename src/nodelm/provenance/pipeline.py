@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -53,6 +54,28 @@ def has_exact_normalization_evidence_lineage(
         tuple(item for item in lineage if item.startswith(f"{value.partition(':')[0]}:"))
         == (value,)
         for value in expected
+    )
+
+
+def has_exact_normalized_sample_lineage(
+    lineage: tuple[str, ...],
+    *,
+    source_repository_id: str,
+    source_revision: str,
+    instance_id: str,
+    evidence_lineage: tuple[str, ...],
+) -> bool:
+    """Match the complete ordered lineage emitted by trace normalization."""
+
+    if len(lineage) != 4 + len(evidence_lineage):
+        return False
+    raw_row = lineage[2]
+    return (
+        lineage[0] == f"hf-dataset:{source_repository_id}@{source_revision}"
+        and lineage[1] == f"instance:{instance_id}"
+        and re.fullmatch(r"raw-row:[0-9a-f]{64}", raw_row) is not None
+        and lineage[3] == f"task-metadata:{instance_id}"
+        and lineage[4:] == evidence_lineage
     )
 
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,10 +15,10 @@ from typing import Any
 from pydantic import ValidationError
 
 from nodelm.artifacts import (
+    ArtifactCollisionError,
     ArtifactWriteResult,
     canonical_json_bytes,
     content_digest,
-    file_identity,
     write_immutable_json,
 )
 from nodelm.datasets.staging import VerifiedStagingError, verified_staged_file
@@ -28,7 +30,7 @@ from nodelm.provenance.manifests import (
     NormalizationManifestV2,
 )
 from nodelm.provenance.pipeline import (
-    has_exact_normalization_evidence_lineage,
+    has_exact_normalized_sample_lineage,
     normalization_evidence_lineage,
 )
 
@@ -67,6 +69,8 @@ _SHARED_FIELDS = (
     "task_source_revision",
 )
 
+_MAX_NORMALIZATION_MANIFEST_BYTES = 1024 * 1024
+
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -88,10 +92,65 @@ def _contained_path(path: Path, *, root: Path) -> Path:
     return resolved
 
 
-def _read_normalization_manifest(path: Path, *, evidence_root: Path) -> _BoundMember:
-    manifest_path = _contained_path(path, root=evidence_root)
+@contextmanager
+def _open_real_regular_file(path: Path) -> Iterator[int]:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(path, flags)
     try:
-        payload = manifest_path.read_bytes()
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("cohort evidence must be a real regular file")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _bounded_regular_file_bytes(path: Path, *, maximum_bytes: int) -> bytes:
+    with _open_real_regular_file(path) as descriptor:
+        metadata = os.fstat(descriptor)
+        if metadata.st_size > maximum_bytes:
+            raise OSError(f"cohort manifest exceeds {maximum_bytes} bytes")
+        payload = bytearray()
+        while len(payload) <= maximum_bytes:
+            chunk = os.read(descriptor, min(64 * 1024, maximum_bytes + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) > maximum_bytes:
+            raise OSError(f"cohort manifest exceeds {maximum_bytes} bytes")
+        return bytes(payload)
+
+
+def _real_regular_file_identity(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with _open_real_regular_file(path) as descriptor:
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return digest.hexdigest(), byte_count
+
+
+def _require_real_regular_path(path: Path) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise OSError("cohort evidence must be a real regular file")
+
+
+def _read_normalization_manifest(path: Path, *, evidence_root: Path) -> _BoundMember:
+    manifest_path = path
+    try:
+        _require_real_regular_path(path)
+        manifest_path = _contained_path(path, root=evidence_root)
+        payload = _bounded_regular_file_bytes(
+            manifest_path,
+            maximum_bytes=_MAX_NORMALIZATION_MANIFEST_BYTES,
+        )
         value = json.loads(payload, object_pairs_hook=_unique_json_object)
         if not isinstance(value, dict):
             raise ValueError("manifest root must be a mapping")
@@ -131,18 +190,16 @@ def _read_normalization_manifest(path: Path, *, evidence_root: Path) -> _BoundMe
         )
         unresolved_normalized_path = manifest_path.parent / normalized_reference.path
         normalized_path = _contained_path(unresolved_normalized_path, root=evidence_root)
-        metadata = unresolved_normalized_path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            raise OSError("normalized member must be a real regular file")
-        normalized_identity = file_identity(normalized_path)
+        _require_real_regular_path(unresolved_normalized_path)
+        _require_real_regular_path(normalized_path)
+        metadata = normalized_path.lstat()
+        if metadata.st_size != normalized_reference.bytes:
+            raise OSError("normalized member byte count disagrees with its manifest")
+        normalized_identity = (normalized_reference.sha256, normalized_reference.bytes)
     except (OSError, ValidationError) as error:
         raise NormalizationCohortError(
             f"unable to read normalized member {manifest.partition_name}: {error}"
         ) from error
-    if normalized_identity != (manifest.normalized_sha256, manifest.normalized_bytes):
-        raise NormalizationCohortError(
-            f"normalization manifest does not bind its artifact: {manifest.partition_name}"
-        )
     return _BoundMember(
         manifest_path=manifest_path,
         manifest_identity=(content_digest(payload), len(payload)),
@@ -162,10 +219,16 @@ def _contained_identity(
     return ManifestFileIdentity(path=relative, sha256=identity[0], bytes=identity[1])
 
 
-def _require_unchanged(member: _BoundMember) -> None:
+def _require_unchanged(member: _BoundMember, *, evidence_root: Path) -> None:
     try:
-        manifest_identity = file_identity(member.manifest_path)
-        normalized_identity = file_identity(member.normalized_path)
+        if _contained_path(member.manifest_path, root=evidence_root) != member.manifest_path:
+            raise OSError("normalization manifest changed location")
+        if _contained_path(member.normalized_path, root=evidence_root) != member.normalized_path:
+            raise OSError("normalized artifact changed location")
+        _require_real_regular_path(member.manifest_path)
+        _require_real_regular_path(member.normalized_path)
+        manifest_identity = _real_regular_file_identity(member.manifest_path)
+        normalized_identity = _real_regular_file_identity(member.normalized_path)
     except OSError as error:
         raise NormalizationCohortError(
             f"unable to recheck cohort member {member.manifest.partition_name}: {error}"
@@ -190,7 +253,8 @@ def build_normalization_cohort(
 
     if len(member_manifest_paths) < 2:
         raise NormalizationCohortError("a normalization cohort requires at least two members")
-    output_root = output.resolve().parent
+    resolved_output = output.resolve()
+    output_root = resolved_output.parent
     members = tuple(
         sorted(
             (
@@ -212,9 +276,7 @@ def build_normalization_cohort(
                     f"normalization cohort members disagree on shared provenance: {field}"
                 )
 
-    if any(
-        output.resolve() in {member.manifest_path, member.normalized_path} for member in members
-    ):
+    if any(resolved_output in {member.manifest_path, member.normalized_path} for member in members):
         raise NormalizationCohortError("cohort output must not collide with a member input")
 
     population_digest = hashlib.sha256()
@@ -222,119 +284,128 @@ def build_normalization_cohort(
     cohort_members: list[NormalizationCohortMemberV1] = []
     sample_count = 0
     with tempfile.TemporaryDirectory(prefix="nodelm-cohort-index-") as index_directory:
-        connection = sqlite3.connect(Path(index_directory) / "sample-ids.sqlite3")
         try:
-            connection.execute("CREATE TABLE sample_ids (sample_id TEXT PRIMARY KEY) WITHOUT ROWID")
-            for member in members:
-                manifest = member.manifest
-                member_count = 0
-                expected_lineage = normalization_evidence_lineage(
-                    materialization_manifest_sha256=(manifest.materialization_manifest_sha256),
-                    partition_name=manifest.partition_name,
-                    upstream_source=manifest.upstream_source,
-                    task_source_name=manifest.task_source_name,
-                    task_source_revision=manifest.task_source_revision,
-                    task_provenance_sha256=manifest.task_provenance_sha256,
+            with closing(
+                sqlite3.connect(Path(index_directory) / "sample-ids.sqlite3")
+            ) as connection:
+                connection.execute(
+                    "CREATE TABLE sample_ids (sample_id TEXT PRIMARY KEY) WITHOUT ROWID"
                 )
-                try:
-                    with (
-                        verified_staged_file(
-                            member.normalized_path,
-                            member.normalized_identity,
-                        ) as staged,
-                        staged.open("rb") as source,
-                    ):
-                        for line_number, raw_row in enumerate(source, start=1):
-                            population_digest.update(raw_row)
-                            population_bytes += len(raw_row)
-                            if not raw_row.strip():
-                                raise NormalizationCohortError(
-                                    f"blank normalized row in "
-                                    f"{manifest.partition_name}:{line_number}"
-                                )
-                            try:
-                                value = json.loads(
-                                    raw_row,
-                                    object_pairs_hook=_unique_json_object,
-                                )
-                                if not isinstance(value, dict):
-                                    raise ValueError("normalized row must be a JSON object")
-                                sample = NormalizedSample.model_validate(value)
-                            except (
-                                UnicodeError,
-                                json.JSONDecodeError,
-                                ValueError,
-                                ValidationError,
-                            ) as error:
-                                raise NormalizationCohortError(
-                                    f"invalid normalized row in "
-                                    f"{manifest.partition_name}:{line_number}: {error}"
-                                ) from error
-                            if raw_row != canonical_json_bytes(sample.model_dump(mode="json")):
-                                raise NormalizationCohortError(
-                                    f"normalized row is not canonical JSONL: "
-                                    f"{manifest.partition_name}:{line_number}"
-                                )
-                            try:
-                                connection.execute(
-                                    "INSERT INTO sample_ids(sample_id) VALUES (?)",
-                                    (sample.sample_id,),
-                                )
-                            except sqlite3.IntegrityError as error:
-                                raise NormalizationCohortError(
-                                    f"duplicate sample_id across normalization cohort: "
-                                    f"{sample.sample_id}"
-                                ) from error
-                            if (
-                                sample.source_dataset != manifest.source_name
-                                or sample.source_dataset_revision.casefold()
-                                != manifest.source_revision.casefold()
-                                or sample.harness != manifest.harness
-                                or sample.generating_model != manifest.generating_model
-                                or not has_exact_normalization_evidence_lineage(
-                                    sample.provenance_lineage,
-                                    expected_lineage,
-                                )
-                            ):
-                                raise NormalizationCohortError(
-                                    f"normalized row lineage disagrees with member manifest: "
-                                    f"{manifest.partition_name}:{line_number}"
-                                )
-                            member_count += 1
-                except VerifiedStagingError as error:
-                    raise NormalizationCohortError(
-                        f"unable to stage normalized member {manifest.partition_name}: {error}"
-                    ) from error
-                if member_count != manifest.accepted_count:
-                    raise NormalizationCohortError(
-                        f"normalized row count does not match member manifest: "
-                        f"{manifest.partition_name}"
-                    )
-                sample_count += member_count
-                cohort_members.append(
-                    NormalizationCohortMemberV1(
+                for member in members:
+                    manifest = member.manifest
+                    member_count = 0
+                    expected_lineage = normalization_evidence_lineage(
+                        materialization_manifest_sha256=(manifest.materialization_manifest_sha256),
                         partition_name=manifest.partition_name,
-                        harness=manifest.harness,
-                        generating_model=manifest.generating_model,
-                        normalization_manifest=_contained_identity(
-                            member.manifest_path,
-                            member.manifest_identity,
-                            root=output_root,
-                        ),
-                        normalized_artifact=_contained_identity(
-                            member.normalized_path,
-                            member.normalized_identity,
-                            root=output_root,
-                        ),
-                        accepted_count=member_count,
+                        upstream_source=manifest.upstream_source,
+                        task_source_name=manifest.task_source_name,
+                        task_source_revision=manifest.task_source_revision,
+                        task_provenance_sha256=manifest.task_provenance_sha256,
                     )
-                )
-        finally:
-            connection.close()
+                    try:
+                        with (
+                            verified_staged_file(
+                                member.normalized_path,
+                                member.normalized_identity,
+                            ) as staged,
+                            staged.open("rb") as source,
+                        ):
+                            for line_number, raw_row in enumerate(source, start=1):
+                                population_digest.update(raw_row)
+                                population_bytes += len(raw_row)
+                                if not raw_row.strip():
+                                    raise NormalizationCohortError(
+                                        f"blank normalized row in "
+                                        f"{manifest.partition_name}:{line_number}"
+                                    )
+                                try:
+                                    value = json.loads(
+                                        raw_row,
+                                        object_pairs_hook=_unique_json_object,
+                                    )
+                                    if not isinstance(value, dict):
+                                        raise ValueError("normalized row must be a JSON object")
+                                    sample = NormalizedSample.model_validate(value)
+                                except (
+                                    UnicodeError,
+                                    json.JSONDecodeError,
+                                    ValueError,
+                                    ValidationError,
+                                ) as error:
+                                    raise NormalizationCohortError(
+                                        f"invalid normalized row in "
+                                        f"{manifest.partition_name}:{line_number}: {error}"
+                                    ) from error
+                                if raw_row != canonical_json_bytes(sample.model_dump(mode="json")):
+                                    raise NormalizationCohortError(
+                                        f"normalized row is not canonical JSONL: "
+                                        f"{manifest.partition_name}:{line_number}"
+                                    )
+                                try:
+                                    connection.execute(
+                                        "INSERT INTO sample_ids(sample_id) VALUES (?)",
+                                        (sample.sample_id,),
+                                    )
+                                except sqlite3.IntegrityError as error:
+                                    raise NormalizationCohortError(
+                                        f"duplicate sample_id across normalization cohort: "
+                                        f"{sample.sample_id}"
+                                    ) from error
+                                if (
+                                    sample.source_dataset != manifest.source_name
+                                    or sample.source_dataset_revision.casefold()
+                                    != manifest.source_revision.casefold()
+                                    or sample.harness != manifest.harness
+                                    or sample.generating_model != manifest.generating_model
+                                    or not has_exact_normalized_sample_lineage(
+                                        sample.provenance_lineage,
+                                        source_repository_id=manifest.source_repository_id,
+                                        source_revision=manifest.source_revision,
+                                        instance_id=sample.issue_or_pr_id,
+                                        evidence_lineage=expected_lineage,
+                                    )
+                                ):
+                                    raise NormalizationCohortError(
+                                        f"normalized row lineage disagrees with member manifest: "
+                                        f"{manifest.partition_name}:{line_number}"
+                                    )
+                                member_count += 1
+                    except VerifiedStagingError as error:
+                        raise NormalizationCohortError(
+                            f"unable to stage normalized member {manifest.partition_name}: {error}"
+                        ) from error
+                    if member_count != manifest.accepted_count:
+                        raise NormalizationCohortError(
+                            f"normalized row count does not match member manifest: "
+                            f"{manifest.partition_name}"
+                        )
+                    sample_count += member_count
+                    cohort_members.append(
+                        NormalizationCohortMemberV1(
+                            partition_name=manifest.partition_name,
+                            harness=manifest.harness,
+                            generating_model=manifest.generating_model,
+                            normalization_manifest=_contained_identity(
+                                member.manifest_path,
+                                member.manifest_identity,
+                                root=output_root,
+                            ),
+                            normalized_artifact=_contained_identity(
+                                member.normalized_path,
+                                member.normalized_identity,
+                                root=output_root,
+                            ),
+                            accepted_count=member_count,
+                        )
+                    )
+        except sqlite3.Error as error:
+            raise NormalizationCohortError(
+                f"unable to build cohort sample-id index: {error}"
+            ) from error
 
     def verify_inputs() -> None:
         for member in members:
-            _require_unchanged(member)
+            _require_unchanged(member, evidence_root=output_root)
 
     cohort = NormalizationCohortManifestV1(
         schema_version="nodelm.normalization-cohort-manifest/v1",
@@ -368,9 +439,12 @@ def build_normalization_cohort(
         population_bytes=population_bytes,
         gold_exposure_audit="NOT RUN",
     )
-    result = write_immutable_json(
-        output,
-        cohort.model_dump(mode="json"),
-        before_publish=verify_inputs,
-    )
+    try:
+        result = write_immutable_json(
+            resolved_output,
+            cohort.model_dump(mode="json"),
+            before_publish=verify_inputs,
+        )
+    except ArtifactCollisionError as error:
+        raise NormalizationCohortError(str(error)) from error
     return result, cohort

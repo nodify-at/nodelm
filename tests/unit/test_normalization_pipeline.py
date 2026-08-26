@@ -6,6 +6,7 @@ from nodelm.models import DatasetSource, VerificationStatus, stable_model_id
 from nodelm.provenance.normalize import NormalizationError, UnknownResolutionError
 from nodelm.provenance.pipeline import (
     has_exact_normalization_evidence_lineage,
+    has_exact_normalized_sample_lineage,
     normalization_evidence_lineage,
     normalize_trace_sample,
     task_metadata_index,
@@ -42,6 +43,39 @@ def test_normalization_evidence_lineage_has_exact_reserved_namespaces() -> None:
         expected,
     )
     assert not has_exact_normalization_evidence_lineage(expected[:-1], expected)
+
+
+def test_normalized_sample_lineage_matches_the_complete_producer_contract() -> None:
+    expected = normalization_evidence_lineage(
+        materialization_manifest_sha256="1" * 64,
+        partition_name="sweagent/model/tasks",
+        upstream_source="tasks",
+        task_source_name="fixture-tasks",
+        task_source_revision="2" * 40,
+        task_provenance_sha256="3" * 64,
+    )
+    lineage = (
+        f"hf-dataset:owner/traces@{'4' * 40}",
+        "instance:acme__widget-1",
+        f"raw-row:{'5' * 64}",
+        "task-metadata:acme__widget-1",
+        *expected,
+    )
+
+    assert has_exact_normalized_sample_lineage(
+        lineage,
+        source_repository_id="owner/traces",
+        source_revision="4" * 40,
+        instance_id="acme__widget-1",
+        evidence_lineage=expected,
+    )
+    assert not has_exact_normalized_sample_lineage(
+        (*lineage, "instance:attacker"),
+        source_repository_id="owner/traces",
+        source_revision="4" * 40,
+        instance_id="acme__widget-1",
+        evidence_lineage=expected,
+    )
 
 
 def test_trace_normalization_joins_only_provenance_safe_task_fields() -> None:
