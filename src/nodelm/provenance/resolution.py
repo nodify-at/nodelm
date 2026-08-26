@@ -307,6 +307,50 @@ def resolution_evaluation_request_digest(request: ResolutionEvaluationRequest) -
     )
 
 
+def evaluation_request_from_target_row(
+    partition_name: str,
+    row: Mapping[str, Any],
+    *,
+    trace_source_revision: str,
+    task_source_revision: str,
+) -> ResolutionEvaluationRequest:
+    """Reconstruct one content-bound evaluator request from an unknown target row.
+
+    This is the narrow replay seam used by the harness canary. It deliberately projects only
+    the exact model patch and the same row identity used by resolution recovery.
+    """
+
+    normalized_partition = _validated_partition_name(partition_name)
+    if _resolution(row) is not None:
+        raise ResolutionRecoveryError("resolution canary target row must still be unknown")
+    language = _row_language(row)
+    if language not in {"TypeScript", "JavaScript"}:
+        raise ResolutionRecoveryError(
+            "resolution canary only supports TypeScript and JavaScript target rows"
+        )
+    instance_id = _canonical_instance_id(row.get("instance_id"))
+    model_patch = _model_patch(row)
+    reference = _row_reference(normalized_partition, row)
+    try:
+        return ResolutionEvaluationRequest(
+            resolution_key=resolution_key_sha256(
+                instance_id=instance_id,
+                model_patch=model_patch,
+                trace_source_revision=trace_source_revision,
+                task_source_revision=task_source_revision,
+            ),
+            instance_id=instance_id,
+            language=cast(SupportedLanguage, language),
+            model_patch=model_patch,
+            model_patch_sha256=model_patch_sha256(model_patch),
+            trace_source_revision=trace_source_revision,
+            task_source_revision=task_source_revision,
+            target_references=(reference,),
+        )
+    except ValueError as error:
+        raise ResolutionRecoveryError(str(error)) from error
+
+
 def resolution_label_conflict_digest(conflict: ResolutionLabelConflict) -> str:
     return _domain_digest(
         _CONFLICT_IDENTITY_SCHEMA,
