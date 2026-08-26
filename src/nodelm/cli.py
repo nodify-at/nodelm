@@ -73,6 +73,11 @@ from nodelm.evaluation.fixture import (
     evaluate_model_patch_fixture,
 )
 from nodelm.evaluation.registry import CandidateRegistry, CandidateRegistryError
+from nodelm.evaluation.resolution_canary import (
+    ResolutionCanaryError,
+    SWERebenchTask,
+    project_swe_rebench_task,
+)
 from nodelm.evaluation.sandbox import PodmanFixtureSandbox
 from nodelm.harness import (
     CommandExecutor,
@@ -96,6 +101,7 @@ from nodelm.provenance.manifests import (
     TASK_PROVENANCE_SAFE_FIELDS,
     ManifestFileIdentity,
     NormalizationManifestV2,
+    ResolutionCanaryWorksetManifestV1,
     ResolutionLanguage,
     ResolutionPartitionInput,
     ResolutionRecoveryManifestV1,
@@ -114,8 +120,15 @@ from nodelm.provenance.pipeline import (
     trace_rollout_key,
 )
 from nodelm.provenance.resolution import (
+    ExactResolutionCandidate,
+    ResolutionEvaluationRequest,
     ResolutionRecoveryError,
     build_resolution_recovery,
+)
+from nodelm.provenance.resolution_canary import (
+    materialize_resolution_canary_cases,
+    recover_transfer_control_requests,
+    select_resolution_canary_sources,
 )
 from nodelm.provenance.task_provenance import (
     TaskProjectionError,
@@ -151,6 +164,9 @@ app.add_typer(harness_app, name="harness")
 app.add_typer(infra_app, name="infra")
 app.add_typer(models_app, name="models")
 app.add_typer(training_app, name="training")
+
+SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
+SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
 
 
 @app.callback()
@@ -1132,6 +1148,321 @@ def datasets_build_resolution_recovery(
         f"wrote candidates={candidate_result.path} rows={manifest.candidate_row_count}; "
         f"queue={queue_result.path} unique={manifest.queue_unique_count}; "
         f"manifest={manifest_result.path} admission={manifest.admission_status}"
+    )
+
+
+@datasets_app.command("build-resolution-canary-workset")
+def datasets_build_resolution_canary_workset(
+    recovery_manifest: Path = typer.Option(..., "--recovery-manifest", exists=True, dir_okay=False),
+    candidates: Path = typer.Option(..., "--candidates", exists=True, dir_okay=False),
+    queue: Path = typer.Option(..., "--queue", exists=True, dir_okay=False),
+    trace_snapshot: Path = typer.Option(..., "--trace-snapshot", exists=True),
+    trace_transfer_receipt: Path = typer.Option(
+        ..., "--trace-transfer-receipt", exists=True, dir_okay=False
+    ),
+    partition_contract: Path = typer.Option(
+        ..., "--partition-contract", exists=True, dir_okay=False
+    ),
+    task_snapshot: Path = typer.Option(..., "--task-snapshot", exists=True),
+    task_transfer_receipt: Path = typer.Option(
+        ..., "--task-transfer-receipt", exists=True, dir_okay=False
+    ),
+    workset_output: Path = typer.Option(..., "--workset-output", dir_okay=False),
+    manifest_output: Path = typer.Option(..., "--manifest-output", dir_okay=False),
+    minimum_per_kind: int = typer.Option(6, "--minimum-per-kind", min=1),
+    maximum_per_kind: int = typer.Option(12, "--maximum-per-kind", min=1),
+    config: Path = typer.Option(Path("configs/datasets/registry.yaml"), exists=True),
+) -> None:
+    """Materialize a small private, provenance-bound real-repository canary workset."""
+
+    if minimum_per_kind > maximum_per_kind:
+        raise typer.BadParameter("--minimum-per-kind must not exceed --maximum-per-kind")
+    if workset_output.resolve() == manifest_output.resolve():
+        raise typer.BadParameter("workset and manifest outputs must be distinct")
+
+    recovery_identity = file_identity(recovery_manifest)
+    candidate_identity = file_identity(candidates)
+    queue_identity = file_identity(queue)
+    contract_identity = file_identity(partition_contract)
+    trace_receipt_identity = file_identity(trace_transfer_receipt)
+    task_receipt_identity = file_identity(task_transfer_receipt)
+    try:
+        recovery = ResolutionRecoveryManifestV1.model_validate_json(recovery_manifest.read_bytes())
+        if candidate_identity != (recovery.candidate_sha256, recovery.candidate_bytes):
+            raise ResolutionCanaryError("candidate artifact does not match recovery manifest")
+        if queue_identity != (recovery.queue_sha256, recovery.queue_bytes):
+            raise ResolutionCanaryError("queue artifact does not match recovery manifest")
+        if contract_identity != (
+            recovery.partition_contract_sha256,
+            recovery.partition_contract_bytes,
+        ):
+            raise ResolutionCanaryError("partition contract does not match recovery manifest")
+        if trace_receipt_identity != (
+            recovery.transfer_receipt_sha256,
+            recovery.transfer_receipt_bytes,
+        ):
+            raise ResolutionCanaryError("trace receipt does not match recovery manifest")
+
+        candidate_count = 0
+
+        def candidate_rows() -> Iterator[ExactResolutionCandidate]:
+            nonlocal candidate_count
+            for row in _read_jsonl(candidates):
+                candidate_count += 1
+                yield ExactResolutionCandidate.model_validate(row)
+
+        request_count = 0
+
+        def request_rows() -> Iterator[ResolutionEvaluationRequest]:
+            nonlocal request_count
+            for row in _read_jsonl(queue):
+                request_count += 1
+                yield ResolutionEvaluationRequest.model_validate(row)
+
+        selection = select_resolution_canary_sources(
+            candidate_rows(),
+            request_rows(),
+            minimum_per_kind=minimum_per_kind,
+            maximum_per_kind=maximum_per_kind,
+        )
+        if candidate_count != recovery.candidate_row_count:
+            raise ResolutionCanaryError("candidate row count does not match recovery manifest")
+        if request_count != recovery.queue_unique_count:
+            raise ResolutionCanaryError("queue row count does not match recovery manifest")
+
+        registry, registry_identity = _load_registry_with_identity(config)
+        trace_source = registry.by_name(recovery.source_name)
+        task_source = registry.by_name(recovery.task_source_name)
+        if (
+            trace_source.revision is None
+            or trace_source.revision.casefold() != recovery.source_revision.casefold()
+            or task_source.revision is None
+            or task_source.revision.casefold() != recovery.task_source_revision.casefold()
+        ):
+            raise ResolutionCanaryError("registry revisions do not match recovery manifest")
+
+        contract = TracePartitionContract.from_bytes(partition_contract.read_bytes())
+        contract.require_source(recovery.source_name, recovery.source_revision)
+        trace_receipt_payload = trace_transfer_receipt.read_bytes()
+        trace_receipt = contract.bind_transfer_receipt(trace_receipt_payload)
+        if (
+            trace_receipt.source != trace_source
+            or trace_receipt.registry_sha256 != registry_identity[0]
+            or trace_receipt.registry_bytes != registry_identity[1]
+        ):
+            raise ResolutionCanaryError("trace receipt does not bind the selected registry")
+        require_authorized_snapshot_seal(
+            source_name=trace_source.name,
+            source_revision=recovery.source_revision,
+            transfer_receipt_sha256=trace_receipt_identity[0],
+            snapshot_sha256=trace_receipt.snapshot.snapshot_sha256,
+            snapshot_file_count=len(trace_receipt.snapshot.files),
+        )
+
+        task_receipt = DatasetSnapshotTransferReceipt.model_validate_json(
+            task_transfer_receipt.read_bytes()
+        )
+        if (
+            task_receipt.source != task_source
+            or task_receipt.registry_sha256 != registry_identity[0]
+            or task_receipt.registry_bytes != registry_identity[1]
+        ):
+            raise ResolutionCanaryError("task receipt does not bind the selected registry")
+        require_authorized_snapshot_seal(
+            source_name=task_source.name,
+            source_revision=recovery.task_source_revision,
+            transfer_receipt_sha256=task_receipt_identity[0],
+            snapshot_sha256=task_receipt.snapshot.snapshot_sha256,
+            snapshot_file_count=len(task_receipt.snapshot.files),
+        )
+
+        trace_expected = {
+            identity.path: (identity.sha256, identity.bytes)
+            for partition in recovery.target_partitions
+            for identity in partition.files
+        }
+        trace_inputs = _receipt_bound_snapshot_files(
+            trace_snapshot,
+            expected_by_path=trace_expected,
+            patterns=tuple(sorted(trace_expected)),
+        )
+        task_expected = {
+            identity.path: (identity.sha256, identity.bytes)
+            for identity in task_receipt.snapshot.files
+        }
+        task_inputs = _receipt_bound_snapshot_files(
+            task_snapshot,
+            expected_by_path=task_expected,
+            patterns=tuple(sorted(task_expected)),
+        )
+
+        selected_instance_ids = {item.instance_id for item in selection.transfer_controls} | {
+            item.instance_id for item in selection.evaluation_requests
+        }
+        trace_paths = tuple(sorted(trace_expected))
+        with (
+            verified_staged_files(trace_inputs) as staged_trace_files,
+            verified_staged_files(task_inputs) as staged_task_files,
+        ):
+            staged_trace_by_path = dict(zip(trace_paths, staged_trace_files, strict=True))
+
+            def target_rows() -> Iterator[tuple[str, dict[str, Any]]]:
+                columns = (
+                    "instance_id",
+                    "trajectory_id",
+                    "resolved",
+                    "language",
+                    "hf_dataset_name",
+                    "metadata.model_patch.patch",
+                )
+                for partition in recovery.target_partitions:
+                    paths = tuple(
+                        staged_trace_by_path[identity.path] for identity in partition.files
+                    )
+                    for row in iter_snapshot_rows(paths, columns=columns):
+                        yield partition.partition_name, row
+
+            recovered_controls = recover_transfer_control_requests(
+                selection.transfer_controls,
+                target_rows(),
+                trace_source_revision=recovery.source_revision,
+                task_source_revision=recovery.task_source_revision,
+            )
+
+            tasks_by_instance: dict[str, SWERebenchTask] = {}
+            task_columns = (
+                "instance_id",
+                "repo",
+                "base_commit",
+                "language",
+                "image_name",
+                "test_patch",
+                "FAIL_TO_PASS",
+                "PASS_TO_PASS",
+                "install_config",
+            )
+            for row in iter_snapshot_rows(staged_task_files, columns=task_columns):
+                instance_id = row.get("instance_id")
+                if not isinstance(instance_id, str) or instance_id not in selected_instance_ids:
+                    continue
+                task = project_swe_rebench_task(
+                    row,
+                    task_source_revision=recovery.task_source_revision,
+                )
+                existing = tasks_by_instance.get(task.instance_id)
+                if existing is not None and existing != task:
+                    raise ResolutionCanaryError(
+                        "selected instance has conflicting private task rows"
+                    )
+                tasks_by_instance[task.instance_id] = task
+            if set(tasks_by_instance) != selected_instance_ids:
+                raise ResolutionCanaryError(
+                    "private task snapshot does not contain every selected instance"
+                )
+
+            cases = materialize_resolution_canary_cases(
+                selection,
+                recovered_controls=recovered_controls,
+                tasks_by_instance=tasks_by_instance,
+            )
+
+            def verify_inputs() -> None:
+                for path, identity in (
+                    *trace_inputs,
+                    *task_inputs,
+                    (recovery_manifest, recovery_identity),
+                    (candidates, candidate_identity),
+                    (queue, queue_identity),
+                    (partition_contract, contract_identity),
+                    (trace_transfer_receipt, trace_receipt_identity),
+                    (task_transfer_receipt, task_receipt_identity),
+                    (config, registry_identity),
+                ):
+                    _require_unchanged_file(path, identity)
+
+            def write_workset(stream: BinaryIO) -> None:
+                for case in cases:
+                    stream.write(canonical_json_bytes(case.model_dump(mode="json")))
+
+            workset_result = write_immutable_stream(
+                workset_output,
+                write_workset,
+                before_publish=verify_inputs,
+            )
+            workset_identity = _published_artifact_identity(
+                workset_result.path,
+                workset_result.digest,
+            )
+
+            canary_manifest = ResolutionCanaryWorksetManifestV1(
+                schema_version="nodelm.resolution-canary-workset/v1",
+                materialization_status="PASS",
+                execution_status="NOT RUN",
+                admission_status="BLOCKED",
+                admission_blocker="canary_execution_pending",
+                recovery_manifest_sha256=recovery_identity[0],
+                recovery_manifest_bytes=recovery_identity[1],
+                candidate_sha256=candidate_identity[0],
+                candidate_bytes=candidate_identity[1],
+                queue_sha256=queue_identity[0],
+                queue_bytes=queue_identity[1],
+                trace_source_name=recovery.source_name,
+                trace_source_revision=recovery.source_revision,
+                trace_transfer_receipt_sha256=trace_receipt_identity[0],
+                task_source_name=recovery.task_source_name,
+                task_source_revision=recovery.task_source_revision,
+                task_transfer_receipt_sha256=task_receipt_identity[0],
+                selection_algorithm="nodelm.resolution-canary-cover/v1",
+                minimum_per_kind=minimum_per_kind,
+                maximum_per_kind=maximum_per_kind,
+                evaluator_repository_id=SWE_REBENCH_EVALUATOR_REPOSITORY_ID,
+                evaluator_revision=SWE_REBENCH_EVALUATOR_REVISION,
+                workset_artifact=os.path.relpath(
+                    workset_result.path,
+                    start=manifest_output.resolve().parent,
+                ),
+                workset_sha256=workset_identity[0],
+                workset_bytes=workset_identity[1],
+                case_count=len(cases),
+                transfer_control_count=len(selection.transfer_controls),
+                evaluation_request_count=len(selection.evaluation_requests),
+                languages=tuple(sorted({case.language for case in cases})),
+                target_partitions=tuple(
+                    sorted(
+                        {
+                            reference.partition_name
+                            for case in cases
+                            for reference in case.target_references
+                        }
+                    )
+                ),
+            )
+
+            def verify_manifest_boundary() -> None:
+                verify_inputs()
+                _require_unchanged_file(workset_result.path, workset_identity)
+
+            manifest_result = write_immutable_json(
+                manifest_output,
+                canary_manifest.model_dump(mode="json"),
+                before_publish=verify_manifest_boundary,
+            )
+    except (
+        OSError,
+        PartitionContractError,
+        RegistryError,
+        ResolutionCanaryError,
+        ResolutionRecoveryError,
+        SnapshotSealError,
+        ValidationError,
+        ValueError,
+        VerifiedStagingError,
+    ) as error:
+        raise typer.BadParameter(f"resolution canary workset failed: {error}") from error
+
+    typer.echo(
+        f"wrote workset={workset_result.path} cases={canary_manifest.case_count}; "
+        f"manifest={manifest_result.path} execution={canary_manifest.execution_status}"
     )
 
 

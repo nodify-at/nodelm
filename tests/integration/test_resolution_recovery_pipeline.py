@@ -17,7 +17,11 @@ from nodelm.datasets.seals import (
     AUTHORIZED_SNAPSHOT_SEALS_BY_SOURCE_REVISION,
     SnapshotSeal,
 )
-from nodelm.provenance.manifests import ResolutionRecoveryManifestV1
+from nodelm.evaluation.resolution_canary import ResolutionCanaryCase
+from nodelm.provenance.manifests import (
+    ResolutionCanaryWorksetManifestV1,
+    ResolutionRecoveryManifestV1,
+)
 
 
 def _trace(
@@ -198,6 +202,60 @@ def _run_resolution_recovery(
     return result, candidates, queue, manifest
 
 
+def _authorize_task_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    registry_path = tmp_path / "registry.yaml"
+    registry = DatasetRegistry.load(registry_path)
+    task_snapshot = tmp_path / "task-snapshot"
+    _write_jsonl(
+        task_snapshot / "tasks.jsonl",
+        [
+            {
+                "instance_id": instance_id,
+                "repo": "owner/repo",
+                "base_commit": character * 40,
+                "language": language,
+                "license": "MIT",
+                "image_name": f"docker.io/swerebenchv2/owner-repo:{character}",
+                "patch": "GOLD_SOLUTION_MUST_NOT_ENTER_WORKSET",
+                "test_patch": f"PRIVATE_TEST_PATCH_{character}",
+                "FAIL_TO_PASS": [f"fails-{character}"],
+                "PASS_TO_PASS": [f"passes-{character}"],
+                "install_config": {
+                    "test_cmd": "npm test -- --verbose",
+                    "log_parser": "parse_log_jest",
+                },
+            }
+            for instance_id, language, character in (
+                ("task-match", "ts", "d"),
+                ("task-queue", "js", "e"),
+            )
+        ],
+    )
+    registry_identity = file_identity(registry_path)
+    snapshot_identity = capture_snapshot_identity(task_snapshot)
+    receipt = build_snapshot_transfer_receipt(
+        source=registry.by_name("fixture-tasks"),
+        registry_sha256=registry_identity[0],
+        registry_bytes=registry_identity[1],
+        snapshot=snapshot_identity,
+    )
+    receipt_path = tmp_path / "tasks.transfer.json"
+    write_immutable_json(receipt_path, receipt.model_dump(mode="json"))
+    monkeypatch.setitem(
+        AUTHORIZED_SNAPSHOT_SEALS_BY_SOURCE_REVISION,
+        ("fixture-tasks", "c" * 40),
+        SnapshotSeal(
+            transfer_receipt_sha256=file_identity(receipt_path)[0],
+            snapshot_sha256=snapshot_identity.snapshot_sha256,
+            snapshot_file_count=len(snapshot_identity.files),
+        ),
+    )
+    return task_snapshot, receipt_path
+
+
 def test_build_resolution_recovery_emits_blocked_sidecar_and_deduplicated_queue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -238,6 +296,89 @@ def test_build_resolution_recovery_emits_blocked_sidecar_and_deduplicated_queue(
     assert len(queue_rows[0]["target_references"]) == 2
     published = candidates.read_text() + queue.read_text() + manifest.read_text()
     assert "MUST_NOT_CROSS_RECOVERY_PROJECTION" not in published
+
+
+def test_build_resolution_canary_workset_replays_exact_controls_and_private_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matched_patch = "diff --git a/matched.ts b/matched.ts\n+repair();\n"
+    queued_patch = "diff --git a/queued.js b/queued.js\n+retry();\n"
+    result, candidates, queue, recovery_manifest = _run_resolution_recovery(
+        tmp_path,
+        monkeypatch,
+        labeled_rows=[_trace("task-match", "teacher-1", matched_patch, resolved=1, language="ts")],
+        openhands_target_rows=[
+            _trace("task-match", "target-1", matched_patch, resolved=-1, language="TypeScript"),
+            _trace("task-queue", "target-2", queued_patch, resolved=-1, language="js"),
+        ],
+        sweagent_target_rows=[
+            _trace("task-queue", "target-3", queued_patch, resolved=-1, language="javascript")
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    task_snapshot, task_receipt = _authorize_task_snapshot(tmp_path, monkeypatch)
+    workset = tmp_path / "canary.workset.jsonl"
+    manifest = tmp_path / "canary.workset.manifest.json"
+
+    canary = CliRunner().invoke(
+        app,
+        [
+            "datasets",
+            "build-resolution-canary-workset",
+            "--recovery-manifest",
+            str(recovery_manifest),
+            "--candidates",
+            str(candidates),
+            "--queue",
+            str(queue),
+            "--trace-snapshot",
+            str(tmp_path / "snapshot"),
+            "--trace-transfer-receipt",
+            str(tmp_path / "traces.transfer.json"),
+            "--partition-contract",
+            str(tmp_path / "partitions.yaml"),
+            "--task-snapshot",
+            str(task_snapshot),
+            "--task-transfer-receipt",
+            str(task_receipt),
+            "--workset-output",
+            str(workset),
+            "--manifest-output",
+            str(manifest),
+            "--minimum-per-kind",
+            "1",
+            "--maximum-per-kind",
+            "4",
+            "--config",
+            str(tmp_path / "registry.yaml"),
+        ],
+    )
+
+    assert canary.exit_code == 0, canary.output
+    workset_rows = [
+        ResolutionCanaryCase.model_validate_json(line) for line in workset.read_text().splitlines()
+    ]
+    assert len(workset_rows) == 2
+    assert {case.kind for case in workset_rows} == {
+        "evaluation_request",
+        "transfer_control",
+    }
+    assert {case.expected_resolved for case in workset_rows} == {None, True}
+    workset_payload = workset.read_text()
+    assert "PRIVATE_TEST_PATCH" in workset_payload
+    assert "GOLD_SOLUTION_MUST_NOT_ENTER_WORKSET" not in workset_payload
+
+    workset_manifest = ResolutionCanaryWorksetManifestV1.model_validate_json(
+        manifest.read_bytes()
+    )
+    assert workset_manifest.materialization_status == "PASS"
+    assert workset_manifest.execution_status == "NOT RUN"
+    assert workset_manifest.admission_status == "BLOCKED"
+    assert workset_manifest.case_count == 2
+    assert workset_manifest.transfer_control_count == 1
+    assert workset_manifest.evaluation_request_count == 1
+    assert "PRIVATE_TEST_PATCH" not in manifest.read_text()
 
 
 def test_build_resolution_recovery_conflict_fails_before_publishing_any_artifact(

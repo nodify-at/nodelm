@@ -346,6 +346,64 @@ class ResolutionRecoveryManifestV1(_ArtifactManifest):
         return self
 
 
+class ResolutionCanaryWorksetManifestV1(_ArtifactManifest):
+    schema_version: Literal["nodelm.resolution-canary-workset/v1"]
+    materialization_status: Literal["PASS"]
+    execution_status: Literal["NOT RUN"]
+    admission_status: Literal["BLOCKED"]
+    admission_blocker: Literal["canary_execution_pending"]
+    recovery_manifest_sha256: Sha256
+    recovery_manifest_bytes: ByteCount
+    candidate_sha256: Sha256
+    candidate_bytes: ByteCount
+    queue_sha256: Sha256
+    queue_bytes: ByteCount
+    trace_source_name: NonEmptyStr
+    trace_source_revision: CommitSha
+    trace_transfer_receipt_sha256: Sha256
+    task_source_name: NonEmptyStr
+    task_source_revision: CommitSha
+    task_transfer_receipt_sha256: Sha256
+    selection_algorithm: Literal["nodelm.resolution-canary-cover/v1"]
+    minimum_per_kind: Annotated[StrictInt, Field(gt=0)]
+    maximum_per_kind: Annotated[StrictInt, Field(gt=0)]
+    evaluator_repository_id: Annotated[
+        StrictStr,
+        Field(pattern=r"^[^/\s]+/[^/\s]+$"),
+    ]
+    evaluator_revision: CommitSha
+    workset_artifact: NonEmptyStr
+    workset_sha256: Sha256
+    workset_bytes: ByteCount
+    case_count: PositiveRowCount
+    transfer_control_count: PositiveRowCount
+    evaluation_request_count: PositiveRowCount
+    languages: tuple[ResolutionLanguage, ...] = Field(min_length=1)
+    target_partitions: tuple[PartitionName, ...] = Field(min_length=1)
+
+    @field_validator("languages", "target_partitions")
+    @classmethod
+    def require_sorted_unique_values(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if values != tuple(sorted(values)) or len(values) != len(set(values)):
+            raise ValueError("resolution canary coverage values must be unique and sorted")
+        return values
+
+    @model_validator(mode="after")
+    def verify_workset_accounting(self) -> ResolutionCanaryWorksetManifestV1:
+        if self.minimum_per_kind > self.maximum_per_kind:
+            raise ValueError("minimum_per_kind must not exceed maximum_per_kind")
+        if self.transfer_control_count + self.evaluation_request_count != self.case_count:
+            raise ValueError("resolution canary case counts must equal case_count")
+        if (
+            self.transfer_control_count < self.minimum_per_kind
+            or self.evaluation_request_count < self.minimum_per_kind
+            or self.transfer_control_count > self.maximum_per_kind
+            or self.evaluation_request_count > self.maximum_per_kind
+        ):
+            raise ValueError("resolution canary case counts violate selection bounds")
+        return self
+
+
 class NormalizationManifestV2(_ArtifactManifest):
     schema_version: Literal["nodelm.normalization-manifest/v2"]
     status: TerminalStatus
