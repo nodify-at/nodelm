@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tempfile
@@ -51,6 +52,10 @@ _TIMING_NORMALIZE_RES = (
 )
 _EVALUATION_OUTCOMES = frozenset({OutcomeCategory.SUCCESS, OutcomeCategory.TEST_FAILURE})
 _NUMBERED_JS_FAILURE = re.compile(r"^\s*\d+\)\s+(.+?)(?::)?\s*$")
+_JEST_CROSS_FAILURE = re.compile(r"^\s*✕\s+(.+?)\s*$")
+_AVA_REJECTION_FAILURE = re.compile(
+    r"^\s*✘\s+\[fail\]:\s+(.+?)\s+Rejected promise returned by test\s*$"
+)
 
 SWE_REBENCH_EVALUATOR_REPOSITORY_ID = "SWE-rebench/SWE-rebench-V2"
 SWE_REBENCH_EVALUATOR_REVISION = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"
@@ -411,10 +416,14 @@ class ResolutionCanaryOracle:
                 for name in (*case.task.fail_to_pass, *case.task.pass_to_pass)
             }
             for line in resolution_canary_output(result).splitlines():
-                match = _NUMBERED_JS_FAILURE.fullmatch(line)
-                if match is None:
+                if (match := _NUMBERED_JS_FAILURE.fullmatch(line)) is not None:
+                    name = _normalize_test_name(match.group(1).removesuffix(":"))
+                elif (match := _JEST_CROSS_FAILURE.fullmatch(line)) is not None or (
+                    match := _AVA_REJECTION_FAILURE.fullmatch(line)
+                ) is not None:
+                    name = _normalize_test_name(match.group(1))
+                else:
                     continue
-                name = _normalize_test_name(match.group(1).removesuffix(":"))
                 if name in expected and name not in normalized:
                     normalized[name] = "FAILED"
         return normalized
@@ -820,6 +829,10 @@ def _attempt_script(case: ResolutionCanaryCase, *, include_model_patch: bool) ->
     return "\n".join(commands)
 
 
+def _execution_patch_text(patch: str) -> str:
+    return patch if patch.endswith("\n") else patch + "\n"
+
+
 class SWERebenchSeccompChrootSandbox:
     """Run fresh OCI rootfs clones with seccomp, chroot, UID, and resource isolation."""
 
@@ -978,6 +991,64 @@ class SWERebenchSeccompChrootSandbox:
             raise ResolutionCanaryError("OCI runtime working directory is invalid") from error
         return cls._validated_workdir(workdir)
 
+    def _prepare_sandbox_identity(self, rootfs: Path) -> None:
+        etc = rootfs / "etc"
+        if etc.is_symlink() or (etc.exists() and not etc.is_dir()):
+            raise ResolutionCanaryError("OCI identity directory is unsafe")
+        passwd = etc / "passwd"
+        group = etc / "group"
+        for path in (passwd, group):
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise ResolutionCanaryError("OCI identity file is unsafe")
+        try:
+            passwd_text = passwd.read_text(encoding="utf-8") if passwd.exists() else ""
+            group_text = group.read_text(encoding="utf-8") if group.exists() else ""
+        except (OSError, UnicodeError) as error:
+            raise ResolutionCanaryError("OCI identity file is unreadable") from error
+
+        identifier = str(self.sandbox_uid)
+        for line in passwd_text.splitlines():
+            fields = line.split(":")
+            if fields[:1] == ["nodelm-canary"] or (len(fields) > 2 and fields[2] == identifier):
+                raise ResolutionCanaryError("OCI sandbox UID conflicts with an image user")
+        for line in group_text.splitlines():
+            fields = line.split(":")
+            if fields[:1] == ["nodelm-canary"] or (len(fields) > 2 and fields[2] == identifier):
+                raise ResolutionCanaryError("OCI sandbox GID conflicts with an image group")
+
+        etc.mkdir(mode=0o755, exist_ok=True)
+        separator = "" if not passwd_text or passwd_text.endswith("\n") else "\n"
+        passwd.write_text(
+            passwd_text + separator + f"nodelm-canary:x:{identifier}:{identifier}:NodeLM canary:"
+            "/tmp/nodelm-home:/bin/false\n",
+            encoding="utf-8",
+        )
+        separator = "" if not group_text or group_text.endswith("\n") else "\n"
+        group.write_text(
+            group_text + separator + f"nodelm-canary:x:{identifier}:\n",
+            encoding="utf-8",
+        )
+        passwd.chmod(0o644)
+        group.chmod(0o644)
+
+    @staticmethod
+    def _validated_corepack_cache(rootfs: Path) -> Path | None:
+        candidate = rootfs
+        for part in ("root", ".cache", "node", "corepack"):
+            candidate /= part
+            if candidate.is_symlink():
+                raise ResolutionCanaryError("OCI Corepack cache contains a symlinked parent")
+            if not candidate.exists():
+                return None
+            if not candidate.is_dir():
+                raise ResolutionCanaryError("OCI Corepack cache path is not a directory")
+        for parent, directories, files in os.walk(candidate, followlinks=False):
+            for name in (*directories, *files):
+                mode = (Path(parent) / name).lstat().st_mode
+                if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                    raise ResolutionCanaryError("OCI Corepack cache contains a special file")
+        return candidate
+
     def _prepare_rootfs(self, rootfs: Path, workdir: str) -> None:
         workdir = self._validated_workdir(workdir)
         try:
@@ -1004,11 +1075,26 @@ class SWERebenchSeccompChrootSandbox:
         ):
             raise ResolutionCanaryError("OCI rootfs does not contain the expected repository")
         repository = resolved_repository
+        corepack_cache = self._validated_corepack_cache(resolved_rootfs)
+
+        temporary = resolved_rootfs / "tmp"
+        if temporary.is_symlink() or (temporary.exists() and not temporary.is_dir()):
+            raise ResolutionCanaryError("OCI temporary directory is unsafe")
+        home = temporary / "nodelm-home"
+        if home.is_symlink() or (home.exists() and not home.is_dir()):
+            raise ResolutionCanaryError("OCI sandbox home is unsafe")
+        home_corepack = home / ".cache" / "node" / "corepack"
+        if home_corepack.is_symlink() or home_corepack.exists():
+            raise ResolutionCanaryError("OCI sandbox Corepack cache destination is unsafe")
+
+        self._prepare_sandbox_identity(resolved_rootfs)
         inputs = rootfs / "nodelm-input"
         inputs.mkdir(mode=0o700)
-        home = rootfs / "tmp" / "nodelm-home"
         home.mkdir(parents=True, mode=0o700, exist_ok=True)
-        (rootfs / "tmp").chmod(0o1777)
+        temporary.chmod(0o1777)
+        if corepack_cache is not None:
+            home_corepack.parent.mkdir(parents=True)
+            shutil.copytree(corepack_cache, home_corepack, symlinks=True)
         devices = rootfs / "dev"
         for entry in devices.iterdir():
             mode = entry.lstat().st_mode
@@ -1030,7 +1116,10 @@ class SWERebenchSeccompChrootSandbox:
             for name in (*directories, *files):
                 os.lchown(Path(parent) / name, self.sandbox_uid, self.sandbox_uid)
         os.chown(inputs, self.sandbox_uid, self.sandbox_uid)
-        os.chown(home, self.sandbox_uid, self.sandbox_uid)
+        for parent, directories, files in os.walk(home, followlinks=False):
+            os.chown(parent, self.sandbox_uid, self.sandbox_uid)
+            for name in (*directories, *files):
+                os.lchown(Path(parent) / name, self.sandbox_uid, self.sandbox_uid)
 
     def run(
         self,
@@ -1074,8 +1163,12 @@ class SWERebenchSeccompChrootSandbox:
             self._prepare_rootfs(rootfs, workdir)
             inputs = rootfs / "nodelm-input"
             if include_model_patch:
-                (inputs / "model.patch").write_text(case.model_patch, encoding="utf-8")
-            (inputs / "test.patch").write_text(case.task.test_patch, encoding="utf-8")
+                (inputs / "model.patch").write_text(
+                    _execution_patch_text(case.model_patch), encoding="utf-8"
+                )
+            (inputs / "test.patch").write_text(
+                _execution_patch_text(case.task.test_patch), encoding="utf-8"
+            )
             for path in inputs.iterdir():
                 os.chown(path, self.sandbox_uid, self.sandbox_uid)
                 path.chmod(0o400)
@@ -1280,8 +1373,12 @@ class SWERebenchPodmanSandbox:
         with tempfile.TemporaryDirectory(prefix="nodelm-resolution-canary-") as temporary_name:
             temporary = Path(temporary_name).resolve()
             if include_model_patch:
-                (temporary / "model.patch").write_text(case.model_patch, encoding="utf-8")
-            (temporary / "test.patch").write_text(case.task.test_patch, encoding="utf-8")
+                (temporary / "model.patch").write_text(
+                    _execution_patch_text(case.model_patch), encoding="utf-8"
+                )
+            (temporary / "test.patch").write_text(
+                _execution_patch_text(case.task.test_patch), encoding="utf-8"
+            )
             self._ensure_ready(temporary, image)
             container_name = f"nodelm-resolution-canary-{secrets.token_hex(12)}"
             cidfile = temporary / "container.cid"

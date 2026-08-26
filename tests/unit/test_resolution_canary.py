@@ -5,6 +5,7 @@ from typing import Literal
 
 import pytest
 
+import nodelm.evaluation.resolution_canary as resolution_canary_module
 from nodelm.evaluation.resolution_canary import (
     SWE_REBENCH_EVALUATOR_REVISION,
     PinnedContainerImage,
@@ -350,6 +351,85 @@ def test_oracle_recovers_exact_numbered_failures_omitted_by_pinned_js_parser() -
     assert result.task_resolved is True
 
 
+def test_oracle_recovers_exact_jest_cross_failures_omitted_by_pinned_js_parser() -> None:
+    task = _task().model_copy(update={"log_parser": "parse_log_js_4"})
+    case = build_evaluation_case(_request("a"), task)
+
+    def pinned_like_parser(_name: str, output: str) -> dict[str, str]:
+        parsed = {"keeps behavior": "PASSED"}
+        if "✓ fixes bug" in output:
+            parsed["fixes bug"] = "PASSED"
+        return parsed
+
+    result = ResolutionCanaryOracle(pinned_like_parser).evaluate(
+        case,
+        image=PinnedContainerImage(
+            source_image=case.task.image_name,
+            image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+        ),
+        baseline=_command("  ✕ fixes bug (12ms)\n  ✓ keeps behavior"),
+        candidate=_command("  ✓ fixes bug\n  ✓ keeps behavior", exit_code=0),
+        sandbox_evidence={"backend": "fake"},
+    )
+
+    assert result.status is VerificationStatus.PASS
+    assert result.task_resolved is True
+
+
+def test_oracle_recovers_exact_ava_rejection_failures_omitted_by_pinned_js_parser() -> None:
+    task = _task().model_copy(update={"log_parser": "parse_log_js_4"})
+    case = build_evaluation_case(_request("a"), task)
+
+    def pinned_like_parser(_name: str, output: str) -> dict[str, str]:
+        parsed = {"keeps behavior": "PASSED"}
+        if "✓ fixes bug" in output:
+            parsed["fixes bug"] = "PASSED"
+        elif "Rejected promise returned by test" in output:
+            parsed["fixes bug Rejected promise returned by test"] = "FAILED"
+        return parsed
+
+    result = ResolutionCanaryOracle(pinned_like_parser).evaluate(
+        case,
+        image=PinnedContainerImage(
+            source_image=case.task.image_name,
+            image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+        ),
+        baseline=_command(
+            "  ✘ [fail]: fixes bug Rejected promise returned by test\n  ✓ keeps behavior"
+        ),
+        candidate=_command("  ✓ fixes bug\n  ✓ keeps behavior", exit_code=0),
+        sandbox_evidence={"backend": "fake"},
+    )
+
+    assert result.status is VerificationStatus.PASS
+    assert result.task_resolved is True
+
+
+def test_oracle_does_not_recover_ambiguous_or_already_parsed_symbol_failures() -> None:
+    task = _task().model_copy(update={"log_parser": "parse_log_js_4"})
+    case = build_evaluation_case(_request("a"), task)
+
+    def pinned_like_parser(_name: str, _output: str) -> dict[str, str]:
+        return {"fixes bug": "PASSED", "keeps behavior": "PASSED"}
+
+    result = ResolutionCanaryOracle(pinned_like_parser).evaluate(
+        case,
+        image=PinnedContainerImage(
+            source_image=case.task.image_name,
+            image_digest="docker.io/swerebenchv2/owner-repo@sha256:" + "e" * 64,
+        ),
+        baseline=_command(
+            "  ✕ fixes bug with ambiguous suffix\n"
+            "  ✘ [fail]: fixes bug with ambiguous suffix Rejected promise returned by test"
+        ),
+        candidate=_command("  ✓ fixes bug\n  ✓ keeps behavior", exit_code=0),
+        sandbox_evidence={"backend": "fake"},
+    )
+
+    assert result.status is VerificationStatus.FAIL
+    assert result.reason == "failing_baseline_not_reproduced"
+
+
 def test_image_digest_selection_requires_the_source_repository() -> None:
     selected = PodmanImageLocker._select_repo_digest(
         "registry.example:5000/team/repo:canary",
@@ -420,6 +500,14 @@ def test_oci_runtime_configuration_rejects_unsafe_paths_and_bounds(tmp_path: Pat
         SWERebenchSeccompChrootSandbox(image_root=linked)
 
 
+def test_execution_patch_copy_adds_only_a_missing_terminal_line_feed() -> None:
+    complete = "diff --git a/src/a.ts b/src/a.ts\n"
+    unterminated = complete.rstrip("\n")
+
+    assert resolution_canary_module._execution_patch_text(complete) == complete
+    assert resolution_canary_module._execution_patch_text(unterminated) == complete
+
+
 def test_seccomp_chroot_preserves_image_environment_with_safe_overrides(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -455,6 +543,11 @@ def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
     rootfs = tmp_path / "rootfs"
     (rootfs / "KaTeX" / "src").mkdir(parents=True)
     (rootfs / "dev").mkdir()
+    corepack = rootfs / "root" / ".cache" / "node" / "corepack"
+    yarn = corepack / "v1" / "yarn" / "1.22.22"
+    yarn.mkdir(parents=True)
+    (corepack / "lastKnownGood.json").write_text('{"yarn":"1.22.22"}\n')
+    (yarn / ".corepack").write_text('{"hash":"sha512.fixture"}\n')
     sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
     monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.chown", lambda *_: None)
     monkeypatch.setattr("nodelm.evaluation.resolution_canary.os.lchown", lambda *_: None)
@@ -463,6 +556,94 @@ def test_seccomp_chroot_prepares_case_sensitive_oci_workdir(
 
     assert (rootfs / "nodelm-input").is_dir()
     assert (rootfs / "tmp" / "nodelm-home").is_dir()
+    copied = rootfs / "tmp" / "nodelm-home" / ".cache" / "node" / "corepack"
+    assert (copied / "lastKnownGood.json").read_text() == '{"yarn":"1.22.22"}\n'
+    assert (copied / "v1" / "yarn" / "1.22.22" / ".corepack").is_file()
+    assert "nodelm-canary:x:61000:61000:" in (rootfs / "etc" / "passwd").read_text()
+    assert "nodelm-canary:x:61000:" in (rootfs / "etc" / "group").read_text()
+
+
+def test_seccomp_chroot_rejects_conflicting_sandbox_uid_before_chown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    (rootfs / "repository").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    (rootfs / "etc").mkdir()
+    (rootfs / "etc" / "passwd").write_text(
+        "other:x:61000:61000:conflict:/tmp:/bin/false\n", encoding="utf-8"
+    )
+    (rootfs / "etc" / "group").write_text("other:x:61000:\n", encoding="utf-8")
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="sandbox UID"):
+        sandbox._prepare_rootfs(rootfs, "/repository")
+
+    assert chown_calls == []
+
+
+def test_seccomp_chroot_rejects_symlinked_passwd_without_touching_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    outside = tmp_path / "outside-passwd"
+    (rootfs / "repository").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    (rootfs / "etc").mkdir()
+    outside.write_text("host-content\n", encoding="utf-8")
+    (rootfs / "etc" / "passwd").symlink_to(outside)
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="identity file"):
+        sandbox._prepare_rootfs(rootfs, "/repository")
+
+    assert outside.read_text(encoding="utf-8") == "host-content\n"
+    assert chown_calls == []
+
+
+def test_seccomp_chroot_rejects_symlinked_corepack_cache_before_chown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfs = tmp_path / "rootfs"
+    outside = tmp_path / "outside"
+    (rootfs / "repository").mkdir(parents=True)
+    (rootfs / "dev").mkdir()
+    (rootfs / "root" / ".cache" / "node").mkdir(parents=True)
+    outside.mkdir()
+    (rootfs / "root" / ".cache" / "node" / "corepack").symlink_to(outside, target_is_directory=True)
+    chown_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.chown",
+        lambda *args: chown_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "nodelm.evaluation.resolution_canary.os.lchown",
+        lambda *args: chown_calls.append(args),
+    )
+    sandbox = SWERebenchSeccompChrootSandbox(image_root=tmp_path / "images")
+
+    with pytest.raises(ResolutionCanaryError, match="Corepack cache"):
+        sandbox._prepare_rootfs(rootfs, "/repository")
+
+    assert chown_calls == []
 
 
 def test_seccomp_chroot_rejects_intermediate_workdir_symlinks_before_chown(
