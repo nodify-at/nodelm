@@ -248,3 +248,45 @@ The pinned `parse_log_js_4` does not recognize Mocha's numbered failure lines. T
 conservatively add `FAILED` only when such a line exactly names an expected test missing from the
 pinned parser result; existing parser evidence always wins. This preserves ambiguous duplicate
 names while retaining the pinned parser as the primary oracle.
+
+## D-021 — V1 quarantines unverified Qwen3.6 recovery and advances the labeled cohort
+
+The terminal 12-case real-repository canary at commit
+`3c9690abc7f676762f613b84897ca5cf0156cc4a` completed but failed its all-cases admission rule:
+3 cases passed and 9 failed, so execution is `FAIL` and recovery admission remains `BLOCKED`.
+Missing or ambiguous expected-test evidence and contradictory candidate exit evidence are not
+reclassified after seeing results. No failed case may be replaced post hoc, and no recovered
+Qwen3.6 label may enter normalization or training.
+
+For V1, the three all-unknown Qwen3.6 leaves remain preserved as quarantined Tier D evidence.
+Phase 0 advances only with these four existing complete-partition `PASS` normalization manifests:
+
+- `openhands/minimax_m25/swe-rebench-v2`:
+  `68f21f192c1af397837610ef6e4033fb04e9e2a38043f461a42d70ab6b47082e`;
+- `openhands/qwen35_122b/swe-rebench-v2`:
+  `339f4a2923eaa92b07155fb35604ce61c2358f554de09146226124ab01ca0996`;
+- `sweagent/minimax_m25/swe-rebench-v2`:
+  `2ed86030086ededc8c69c8aa8801f49c4034a7cbee2878f7311cf60512cc1c2e`;
+- `sweagent/qwen35_122b/swe-rebench-v2`:
+  `725ab61444546026c10d4e4d6745c324f0430063151650c905cfbc6b7d80b372`.
+
+Together they contain 160,731 accepted rows. A cohort is a manifest of selected complete members,
+not a claim that every source leaf passed. It binds each leaf manifest and artifact, a fixed
+partition-name order, global sample-ID uniqueness, and the SHA-256 of their exact ordered byte
+concatenation without publishing a second copy. The real cohort built at commit
+`24f4eb75f16f6782fdfa85762d3a27cd7fdbef10` contains 4 members, 160,731 samples, and
+51,063,015,261 bytes. Its manifest SHA-256 is
+`10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621`; its population SHA-256
+is `e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`. Gold-exposure,
+decontamination, split, pilot-quality, and training authorization remain independent fail-closed
+gates. The first independent pass through that boundary found zero structural gold-exposure
+findings in all four leaves, but correctly left every overall audit `BLOCKED` because oracle
+isolation is not attested. After review hardening, commit
+`af476d1e85da133b623456d2a34f0ef12a25b857` replayed the real cohort and reproduced the exact
+manifest and ordered-population identities, so the implementation changes did not alter the
+selected population.
+
+Recovery may be reconsidered only as a separately versioned, pre-registered compatibility-aware
+experiment whose selection is label-blind and whose admitted population is restricted to the
+same compatibility domain. The immutable blocked V1 artifacts remain evidence; they are not
+rewritten or discarded.

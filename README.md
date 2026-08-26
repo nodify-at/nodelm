@@ -167,7 +167,15 @@ receipt-replayed normalization canary are also `PASS`; exact evidence is in
 [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). All seven eligible full-partition leaves now have
 terminal evidence: four MiniMax/Qwen3.5 leaves are `PASS`, while three Qwen3.6 leaves are truthful
 `FAIL` because their source resolution is unknown. Real resolution recovery has completed with
-zero conflicts, but admission remains `BLOCKED` pending its prepared isolated repository canary.
-Gold-exposure auditing, decontamination, split and pilot construction, model execution, the
-50–100-task candidate bake-off, student selection, and training remain `NOT RUN`. See
+zero conflicts. Its 12-case isolated repository canary completed 3 `PASS` / 9 `FAIL`, so recovery
+admission remains `BLOCKED`; V1 proceeds only with the four labeled `PASS` leaves and keeps all
+Qwen3.6 unknown rows quarantined. Those four leaves are now bound by a real copy-free cohort:
+160,731 globally unique samples across 51,063,015,261 ordered bytes, with cohort-manifest SHA-256
+`10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621` and population SHA-256
+`e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`.
+All four structural gold scans are `PASS` with zero findings. Oracle isolation and each overall
+gold-exposure audit remain `BLOCKED`. The hardened cohort builder at commit `af476d1` reproduced
+the exact cohort-manifest and ordered-population identities. Decontamination, split and pilot
+construction, model execution, the 50–100-task candidate bake-off, student selection, and training
+remain `NOT RUN`. See
 [`docs/SPEC_STATUS.md`](docs/SPEC_STATUS.md) for the active gates.

@@ -44,6 +44,17 @@ the `nodelm.dataset-audit/v1` shape; complete aggregate-snapshot reports use
 registry, snapshot, logical rows, canonical report, and ledger. Inputs and published dependencies
 are revalidated once at each immutable publication boundary, and lineage is published last.
 
+Multiple complete-partition normalization artifacts are combined virtually, never by writing a
+second population-sized JSONL. `nodelm.normalization-cohort-manifest/v1` binds every leaf manifest
+and normalized artifact under one evidence root, sorts members by partition name, validates
+canonical sample bytes and reserved lineage, enforces global sample-ID uniqueness in a temporary
+disk-backed index, and records the SHA-256 of the exact ordered byte concatenation. One private
+member copy is staged at a time, so copied-data temporary space is bounded by the largest leaf;
+the separate disk-backed uniqueness index grows with the selected population. Its scope is
+truthfully `complete-selected-members`; global selection completeness requires a separate
+reviewed decision such as D-021. Existing single-leaf gold/split/pilot interfaces are not silently
+reused for this virtual population.
+
 Parquet datasets must also record a logical row digest because byte identity can vary with the
 writer version. Generated data, weights, and checkpoints stay outside Git.
 

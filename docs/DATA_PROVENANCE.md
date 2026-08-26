@@ -93,7 +93,12 @@ remains blocked: it has no verified Open-SWE leaf relationship and no top-level 
 
 A normalized manifest deliberately records gold-exposure auditing as `NOT RUN` until a separate
 oracle-isolated comparison is executed. Partition-safe normalization alone is not permission to
-train.
+train. D-021's four selected complete-partition manifests are now bound by a real copy-free cohort
+manifest. It contains 4 members, 160,731 globally unique samples, and 51,063,015,261 ordered
+population bytes. The cohort-manifest SHA-256 is
+`10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621`; the exact ordered
+population SHA-256 is `e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`.
+The cohort manifest itself is not a gold, split, pilot, or training authorization.
 
 Execution note (2026-08-25): the complete pinned V2 task projection and a 1,000-row
 OpenHands/MiniMax normalization canary passed both deterministic raw replays at commit
@@ -105,8 +110,15 @@ MiniMax/Qwen3.5 leaves are `PASS`, while three all-unknown Qwen3.6 leaves are tr
 The subsequent real recovery derivation at commit
 `74c9b505eb1a608431ae3a18a3fca5d084f2ae3b` completed with zero conflicts and published
 1,804 unique exact-transfer keys plus 49,572 unique evaluator requests. Its admission remains
-`BLOCKED` until the real-repository canary runs. The separate gold-exposure/decontamination gates
-remain `NOT RUN`. Exact hashes are in `docs/EXPERIMENTS.md`.
+`BLOCKED`: the terminal real-repository canary completed 3 `PASS` / 9 `FAIL`. D-021 therefore
+quarantines all recovered Qwen3.6 labels and advances V1 only with the four labeled
+complete-partition `PASS` leaves. Those leaves were bound at commit
+`24f4eb75f16f6782fdfa85762d3a27cd7fdbef10` by the 4-member, 160,731-sample cohort described
+above. The hardened builder at commit `af476d1e85da133b623456d2a34f0ef12a25b857` reproduced its
+manifest and ordered-population identities exactly against the real 51,063,015,261-byte
+population. All four independent structural gold scans are `PASS` with zero findings. Oracle
+isolation and each overall gold-exposure audit remain `BLOCKED`; decontamination remains
+`NOT RUN`. Exact hashes are in `docs/EXPERIMENTS.md`.
 
 `SolveContext` is a separate type from evaluation material. It intentionally rejects unknown
 fields so a gold/reference patch cannot be serialized into teacher or student solving input.

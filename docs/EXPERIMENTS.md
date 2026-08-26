@@ -219,8 +219,8 @@ uv run --frozen --directory /workspace/nodelm/repo nodelm datasets normalize \
   `/workspace/nodelm/derived/resolution-recovery-74c9b505eb1a608431ae3a18a3fca5d084f2ae3b`.
 - Wall clock: `2026-08-25T21:23:50Z` through `2026-08-25T21:34:21Z`, or 10 minutes 31 seconds.
   No stochastic seed applied; this was deterministic projection, indexing, and publication.
-- GPU use, model loading, training, and repository evaluation: `NOT RUN`. No recovered label is
-  admitted until the separately prepared canary publishes a `PASS` admission verdict.
+- GPU use, model loading, training, and repository evaluation: `NOT RUN`. No recovered label was
+  admitted; the later terminal canary remained `BLOCKED` as recorded below.
 
 ## 2026-08-26 — restricted Runpod sandbox compatibility probe
 
@@ -237,8 +237,89 @@ uv run --frozen --directory /workspace/nodelm/repo nodelm datasets normalize \
   and agreed with its transferred `resolved=true` label. A direct launcher probe ran as UID 61000
   and an outbound IPv4 socket attempt returned `Operation not permitted`.
 - Scope: this was a manual compatibility probe, not retained terminal evidence and not an admission
-  result. The complete 12-case canary remains `NOT RUN` until the commit-bound runner publishes its
-  immutable execution manifest.
+  result. It was superseded by the terminal commit-bound execution below.
+
+## 2026-08-26 — terminal real-repository resolution canary
+
+- Code and runtime: commit `3c9690abc7f676762f613b84897ca5cf0156cc4a` ran the fixed 12-case
+  workset through the restricted-host `seccomp-chroot` backend. The hardened rootfs supplied an
+  isolated root-owned read-only synthetic `/proc/self/stat`, restoring Node/libuv memory evidence
+  without exposing host procfs. Every attempt remained offline, limited to two CPUs, 4 GiB memory,
+  and a digest-pinned preloaded image.
+- Immutable inputs: recovery manifest SHA-256
+  `94867425f1cb75578ad7d8a8ad86e03212d156f3eed40534c61f3e3dbf5b650f`; workset SHA-256
+  `40724da67b4c4502864f4f09b978efc787d5051315bd3a396a48a74643169c2f`; workset-manifest
+  SHA-256 `ac327cf624ea8d14168fe2e757d7cb11beee8bebbb188bf71732f7e0624d3c07`; and 12-image lock
+  SHA-256 `19d8a66e012c498d708ec6bdefab74cc943ee52502d33c1b01c9e47bee18d0b1`.
+- Result: all 12 cases reached immutable terminal evidence. Execution is `FAIL` and admission is
+  `BLOCKED`: 3 cases passed and 9 failed. Failure accounting is 5
+  `incomplete_expected_test_evidence`, 3 `candidate_exit_status_contradicts_test_evidence`, and
+  1 `failing_baseline_not_reproduced`. Three of six transfer controls agreed; none of the six
+  evaluation requests produced an admissible resolved/unresolved outcome.
+- Artifacts: public results are 21,657 bytes with SHA-256
+  `5b40ca0c1f079310d308ee77ba185b48d7930430719bb1ee0d206f20264132c6`. The terminal execution
+  manifest is 1,721 bytes with SHA-256
+  `d289b4552b55937e2ad981a0844119e6da951e20b23236a7c8cee34f3dc641e7`. Private per-case evidence
+  and public artifacts remain on persistent storage under
+  `/workspace/nodelm/derived/resolution-canary-3c9690abc7f676762f613b84897ca5cf0156cc4a`.
+- Wall clock: `2026-08-26T20:05:06Z` through `20:28:53Z`, approximately 23 minutes 47 seconds.
+  Seed: not applicable; selection and evaluation were deterministic. No GPU, model loading,
+  training, or paid inference ran.
+- Decision: D-021 keeps all recovered Qwen3.6 labels quarantined and advances V1 only with the
+  four already-`PASS` labeled normalization leaves. The canary is complete; its blocked verdict
+  is not retried by weakening the oracle or replacing failed cases.
+
+## 2026-08-26 — selected normalization cohort and structural gold scans
+
+- Code and runtime: the initial real cohort and four structural scans ran at commit
+  `24f4eb75f16f6782fdfa85762d3a27cd7fdbef10`. After review hardening, Python 3.11.13 replayed the
+  cohort at commit `af476d1e85da133b623456d2a34f0ef12a25b857` through the installed module at
+  `/opt/nodelm-venv`. These were deterministic CPU/data-integrity operations; no GPU, model load,
+  training, or paid inference ran.
+- Immutable selected members, expressed as normalization-manifest SHA-256 / normalized-artifact
+  SHA-256 / accepted count:
+  - `openhands/minimax_m25/swe-rebench-v2`:
+    `68f21f192c1af397837610ef6e4033fb04e9e2a38043f461a42d70ab6b47082e` /
+    `38d55c3679643877d9eda6262a430d3e8a77c21f8809599a8a4ee70658de646a` / 38,852;
+  - `openhands/qwen35_122b/swe-rebench-v2`:
+    `339f4a2923eaa92b07155fb35604ce61c2358f554de09146226124ab01ca0996` /
+    `2a39222383f517dd465910a5723d72920be6756ebb987ed36ad3184b1435cd11` / 42,804;
+  - `sweagent/minimax_m25/swe-rebench-v2`:
+    `2ed86030086ededc8c69c8aa8801f49c4034a7cbee2878f7311cf60512cc1c2e` /
+    `7084f03e5e2415e08b24a7160e68729ded045eecc1ff92c701cccfbd26da5dc5` / 44,105;
+  - `sweagent/qwen35_122b/swe-rebench-v2`:
+    `725ab61444546026c10d4e4d6745c324f0430063151650c905cfbc6b7d80b372` /
+    `dbaade2d9c412158d651d9142da8dc4387e2795969ec9d18ae758a67d9f6eddd` / 34,970.
+- Commands: `python -m nodelm datasets build-normalization-cohort` received those four exact
+  manifests via repeated `--member-manifest` arguments. The audit runner then invoked
+  `python -m nodelm datasets audit-gold-exposure` independently for each normalized member with
+  its bound manifest and distinct audit/findings outputs; no `--oracle-isolation-attestation` was
+  supplied. The hardened replay repeated the same cohort command into a new commit-addressed
+  output and required the prior manifest/population identities before publishing `COMPLETE`.
+- Cohort result: `PASS` for 4 members, 160,731 globally unique samples, and 51,063,015,261 ordered
+  bytes. Manifest SHA-256:
+  `10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621`; ordered-population
+  SHA-256: `e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`.
+  The initial build took 28 minutes 38 seconds. The hardened replay ran from `22:00:56Z` through
+  `22:27:17Z`, or 26 minutes 21 seconds, and reproduced both identities exactly.
+- Hardened replay evidence: output manifest bytes 3,457; run-state SHA-256
+  `c0e44ac4762aa0a00a8bc6ad52e6ea310b93ad0f03ffd117de5864c15d7f9e1e`; events-log SHA-256
+  `73919122b0c36860df65cace33cf3b564ce732cd9e223cdc75b5b9dd1bedd3e1`. Evidence is retained at
+  `/workspace/nodelm/derived/normalization-cohort-af476d1e85da133b623456d2a34f0ef12a25b857`.
+- Structural audit result: all four scans are `PASS`, expected and audited counts agree, and every
+  findings ledger is the empty-file SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. Audit SHA-256 values in
+  member order are `71efaa86488ca3c566be0cac75141a1d5371798834e21c75a166e6f301763683`,
+  `6dfe439055d7ead4b5409fae33faaea9f47fd4bb3e64a38aa133e4da9e688ce5`,
+  `8ec4acb308af9b3ebd6b816d937c7995ddf0af462fda0c4cb85e7a7e1f256188`, and
+  `d353e25f6a103271a720c6ab153d82d68d8a16e99d1cf74afa1dd0b0708210a3`.
+  The four-leaf runner took 35 minutes 24 seconds (`21:17:30Z` through `21:52:54Z`); its run-state
+  SHA-256 is `fb76b84cbf80d196112273bf613fbe938d864fff6f00b98fe67512e6fa744d25` and events-log SHA-256 is
+  `2a229ab668b571058b4714606b58d62257436a0c306ff3b4c11ca79f7563af5b`.
+- Oracle isolation and every overall gold-exposure audit remain `BLOCKED` because no attestation
+  was supplied. This is the intended fail-closed result, not a structural failure. Decontamination,
+  split freezing, pilot construction, model execution, and training remain `NOT RUN`. Seed: not
+  applicable.
 
 New experiment entries must include immutable input revisions, config/lock digests, commands,
 versions, seed, artifact hashes, wall-clock time, and `PASS`, `FAIL`, `NOT RUN`, `BLOCKED`, or

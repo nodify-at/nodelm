@@ -35,10 +35,19 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
   `PASS`. All seven eligible full-partition leaves have terminal evidence: four MiniMax/Qwen3.5
   leaves are `PASS`, while three Qwen3.6 leaves are truthful `FAIL` because their source resolution
   is unknown. Real resolution recovery is derived with zero conflicts, but its admission remains
-  `BLOCKED` pending the prepared isolated repository canary. Gold auditing and decontamination remain
-  `NOT RUN`. Require explicit current-session authorization for recovery or re-execution into new,
-  empty destinations and for bulk materialization. Follow `docs/DATA_DOWNLOAD_RUNBOOK.md` and the
-  exact evidence in `docs/EXPERIMENTS.md`.
+  `BLOCKED`: the terminal isolated repository canary completed 3 `PASS` / 9 `FAIL`. D-021 advances
+  V1 only with the four labeled `PASS` leaves and quarantines all Qwen3.6 unknown rows. A real
+  copy-free cohort now binds those four leaves as 160,731 globally unique samples and
+  51,063,015,261 ordered bytes. Its manifest SHA-256 is
+  `10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621`; its ordered-population
+  SHA-256 is `e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`. All four
+  structural gold scans are `PASS` with zero findings, but their oracle-isolation components and
+  overall audits remain `BLOCKED`. The hardened builder at commit
+  `af476d1e85da133b623456d2a34f0ef12a25b857` replayed all four real leaves and reproduced both
+  identities exactly; decontamination remains `NOT RUN`. Require explicit
+  current-session authorization for recovery or re-execution into new, empty destinations and
+  for bulk materialization. Follow
+  `docs/DATA_DOWNLOAD_RUNBOOK.md` and the exact evidence in `docs/EXPERIMENTS.md`.
 - Treat `complete-snapshot` as an input-scope claim: it covers all supported JSONL/Parquet data
   files discovered at the supplied local path. It does not mean the plan's Phase 0 is complete,
   and a synthetic fixture `PASS` is never a real-source audit or lineage result.

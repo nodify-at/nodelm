@@ -6,12 +6,27 @@ One real receipt-replayed normalization canary is `PASS`, and all seven eligible
 Open-SWE leaves now have terminal evidence: four labeled MiniMax/Qwen3.5 leaves are `PASS`, while
 the three Qwen3.6 leaves are truthful `FAIL` because every source resolution is unknown.
 Resolution-recovery derivation is also complete, but its immutable manifest remains admission
-`BLOCKED` pending the real-repository canary. Gold-exposure auditing, decontamination, and split
-freezing remain `NOT RUN`. The completed snapshots and raw evidence live outside Git under
+`BLOCKED`: the terminal real-repository canary completed 3 `PASS` / 9 `FAIL`. D-021 advances V1
+only with the four labeled `PASS` leaves and preserves all Qwen3.6 unknown rows as quarantined
+Tier D. A real `PASS` cohort at commit `24f4eb75f16f6782fdfa85762d3a27cd7fdbef10`
+binds those four leaves as 160,731 globally unique samples and 51,063,015,261 ordered bytes;
+its manifest SHA-256 is `10734b8e20d127bfe69df8c5ffd3c8540038cfa95ad2d2c230ea92fa7e8d2621`
+and its population SHA-256 is `e91207cdca52c6fd08d0fd672c482fb7072117856f380b0b951bbe403fa85269`.
+The hardened builder at commit `af476d1e85da133b623456d2a34f0ef12a25b857` replayed the same
+four real members and reproduced both identities exactly.
+All four structural gold scans are `PASS` with zero findings. Their oracle-isolation components
+and overall audits remain `BLOCKED`; decontamination and split freezing remain `NOT RUN`. The
+completed snapshots and raw evidence live outside Git under
 `/workspace/nodelm` on persistent storage; their compact digest index is
 `artifacts/reports/FULL_DATASET_AUDIT.md`. No re-download is currently required. Use this runbook
 only for canary execution, recovery, or an explicitly authorized re-execution on a new, empty
 external-volume destination. Never run transfer commands from the local project workspace.
+The cohort evidence is retained at
+`/workspace/nodelm/derived/normalization-cohort-24f4eb75f16f6782fdfa85762d3a27cd7fdbef10`;
+the hardened replay evidence is retained at
+`/workspace/nodelm/derived/normalization-cohort-af476d1e85da133b623456d2a34f0ef12a25b857`.
+The structural audit evidence is retained at
+`/workspace/nodelm/audits/gold-exposure-structural-24f4eb75f16f6782fdfa85762d3a27cd7fdbef10`.
 
 ## Completed evidence and safeguards
 
@@ -100,12 +115,21 @@ reused only when byte-identical and missing artifacts are published without over
 evidence. A differing existing artifact, or any terminal artifact without a binding, fails closed.
 Preserve partial outputs and temporary staging remnants for inspection; do not remove them without
 explicit approval. Any code change creates a different commit-bound run directory. A successful
-recovery derivation still ends with `admission=BLOCKED` and `harness_canary_pending`; real evaluator
-execution is a separate later operation on a container-capable CPU host.
+recovery derivation historically ended with `admission=BLOCKED` and `harness_canary_pending`. Its
+later terminal evaluator canary is now complete: 3 cases passed, 9 failed, and recovery admission
+remains `BLOCKED`.
 
-## Resolution harness canary (prepared, not run)
+## Resolution harness canary (completed, admission blocked)
 
-The canary is a sequential CPU workload; it needs no GPU and does not download any dataset. It
+The terminal canary ran at commit `3c9690abc7f676762f613b84897ca5cf0156cc4a` and retained
+validated evidence under
+`/workspace/nodelm/derived/resolution-canary-3c9690abc7f676762f613b84897ca5cf0156cc4a`.
+Its execution verdict is `FAIL` (3 passed, 9 failed) and recovery admission is `BLOCKED`; do not
+rerun it merely to replace failed cases. Exact digests and failure accounting are in
+`docs/EXPERIMENTS.md`.
+
+For an explicitly authorized new-version investigation, the canary is a sequential CPU workload;
+it needs no GPU and does not download any dataset. It
 does need outbound network during preparation to clone the already-pinned public evaluator and
 pull only the selected task images. Repository tests then run without network access. Use an x86_64
 Linux host with the existing `/workspace` persistent mount, at least 16 host CPUs, 64 GiB RAM, and
