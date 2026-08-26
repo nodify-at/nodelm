@@ -1056,13 +1056,23 @@ class SWERebenchSeccompChrootSandbox:
         group.chmod(0o644)
 
     @staticmethod
-    def _prepare_sandbox_proc(rootfs: Path) -> None:
+    def _validated_sandbox_proc(rootfs: Path) -> Path:
         proc = rootfs / "proc"
         if proc.is_symlink() or (proc.exists() and not proc.is_dir()):
             raise ResolutionCanaryError("OCI sandbox proc is unsafe")
         try:
             if proc.exists() and any(proc.iterdir()):
                 raise ResolutionCanaryError("OCI sandbox proc is not empty")
+        except ResolutionCanaryError:
+            raise
+        except OSError as error:
+            raise ResolutionCanaryError("OCI sandbox proc is unsafe") from error
+        return proc
+
+    @classmethod
+    def _prepare_sandbox_proc(cls, rootfs: Path) -> None:
+        proc = cls._validated_sandbox_proc(rootfs)
+        try:
             proc.mkdir(mode=0o755, exist_ok=True)
             sandbox_self = proc / "self"
             sandbox_self.mkdir(mode=0o755)
@@ -1074,8 +1084,6 @@ class SWERebenchSeccompChrootSandbox:
             sandbox_stat.chmod(0o444)
             sandbox_self.chmod(0o555)
             proc.chmod(0o555)
-        except ResolutionCanaryError:
-            raise
         except OSError as error:
             raise ResolutionCanaryError("OCI sandbox proc is unsafe") from error
 
@@ -1132,11 +1140,12 @@ class SWERebenchSeccompChrootSandbox:
         if home.is_symlink() or home.exists():
             raise ResolutionCanaryError("OCI sandbox home is unsafe")
 
+        self._validated_sandbox_proc(resolved_rootfs)
+        self._prepare_sandbox_identity(resolved_rootfs)
         # libuv reads /proc/self/stat for process.memoryUsage(), while mounting the
         # host procfs would expose host state. A fixed zero-RSS record supplies only
         # the field package-manager reporters require inside the offline chroot.
         self._prepare_sandbox_proc(resolved_rootfs)
-        self._prepare_sandbox_identity(resolved_rootfs)
         inputs = rootfs / "nodelm-input"
         inputs.mkdir(mode=0o700)
         temporary.mkdir(mode=0o1777, exist_ok=True)
