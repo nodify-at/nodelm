@@ -17,7 +17,10 @@ from nodelm.datasets.seals import (
     SnapshotSeal,
 )
 from nodelm.decontamination.split import AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_SHA256
-from nodelm.provenance.gold import AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256
+from nodelm.provenance.gold import (
+    AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256,
+    AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256,
+)
 
 
 def test_snapshot_materializes_normalizes_splits_and_builds_a_pilot(
@@ -451,23 +454,69 @@ def test_snapshot_materializes_normalizes_splits_and_builds_a_pilot(
         file_identity(split)[0],
     )
 
-    normalized_identity = file_identity(normalized)
     normalization_manifest_path = tmp_path / "normalized.manifest.json"
+    normalized_identity = file_identity(normalized)
+    raw_identity = file_identity(raw)
+    materialization_identity = file_identity(materialization_manifest)
+    normalization_identity = file_identity(normalization_manifest_path)
     attestation_path = tmp_path / "oracle-isolation.json"
+    oracle_findings = tmp_path / "oracle-isolation.findings.jsonl"
+    oracle_findings.write_bytes(b"")
+    oracle_findings_identity = file_identity(oracle_findings)
     attestation_path.write_bytes(
         canonical_json_bytes(
             {
-                "schema_version": "nodelm.oracle-isolation-attestation/v1",
-                "method_version": "nodelm.oracle-isolation-review/v1",
+                "schema_version": "nodelm.oracle-isolation-attestation/v2",
+                "method_version": "nodelm.oracle-isolation-recorded-context-review/v2",
                 "status": "PASS",
-                "source_name": "fixture-traces",
-                "source_revision": "a" * 40,
-                "partition_name": "fixture/model/tasks",
+                "review_scope": "recorded-model-context-and-upstream-curation",
+                "upstream_review_id": "open-swe-traces-v1.0-paper-git-hacking-review/v1",
+                "source_name": normalization_manifest["source_name"],
+                "source_repository_id": normalization_manifest["source_repository_id"],
+                "source_revision": normalization_manifest["source_revision"],
+                "partition_name": normalization_manifest["partition_name"],
+                "harness": normalization_manifest["harness"],
+                "generating_model": normalization_manifest["generating_model"],
+                "materialization_manifest_artifact": materialization_manifest.name,
+                "materialization_manifest_sha256": materialization_identity[0],
+                "materialization_manifest_bytes": materialization_identity[1],
+                "raw_artifact": raw.name,
+                "raw_sha256": raw_identity[0],
+                "raw_bytes": raw_identity[1],
+                "raw_row_count": normalization_manifest["input_row_count"],
+                "task_provenance_artifact": task_provenance.name,
+                "task_provenance_sha256": file_identity(task_provenance)[0],
+                "task_provenance_bytes": file_identity(task_provenance)[1],
+                "task_provenance_manifest_artifact": task_manifest_path.name,
+                "task_provenance_manifest_sha256": file_identity(task_manifest_path)[0],
+                "task_provenance_manifest_bytes": file_identity(task_manifest_path)[1],
+                "normalization_manifest_artifact": normalization_manifest_path.name,
+                "normalization_manifest_sha256": normalization_identity[0],
+                "normalization_manifest_bytes": normalization_identity[1],
+                "normalized_artifact": normalized.name,
                 "normalized_sha256": normalized_identity[0],
                 "normalized_bytes": normalized_identity[1],
-                "covered_sample_count": 1,
+                "expected_sample_count": normalization_manifest["accepted_count"],
+                "covered_sample_count": normalization_manifest["accepted_count"],
+                "reference_patch_row_count": normalization_manifest["input_row_count"],
+                "checks": [
+                    {"name": "raw-normalized-population-binding", "status": "PASS"},
+                    {"name": "recorded-model-context-boundary", "status": "PASS"},
+                    {"name": "recorded-model-input-gold-absence", "status": "PASS"},
+                    {"name": "reference-patch-coverage", "status": "PASS"},
+                    {"name": "upstream-git-hacking-review", "status": "PASS"},
+                ],
+                "findings_artifact": oracle_findings.name,
+                "findings_sha256": oracle_findings_identity[0],
+                "findings_bytes": oracle_findings_identity[1],
+                "finding_count": 0,
             }
         )
+    )
+    monkeypatch.setitem(
+        AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256,
+        normalized_identity[0],
+        file_identity(attestation_path)[0],
     )
     gold_audit = tmp_path / "gold-exposure.audit.json"
     gold_findings = tmp_path / "gold-exposure.findings.jsonl"

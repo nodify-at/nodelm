@@ -80,7 +80,10 @@ This file is the durable handoff for future Codex work on NodeLM. Read it togeth
 - Never build or train from a normalized JSONL alone. Pilot construction requires its replay-
   verified normalization manifest, a reviewed split digest authorized for the same bytes and row
   count, and a reviewed, code-authorized `PASS` gold-exposure audit with complete oracle-isolation
-  coverage. Build the split from private identity-verified copies of every input. The one-step
+  coverage. Oracle isolation uses the v2 raw-context review and requires its exact attestation
+  digest to be code-authorized for the normalized bytes before the audit may pass; the resulting
+  audit digest is authorized separately. Build the split from private identity-verified copies of
+  every input. The one-step
   training lifecycle requires the exact reviewed pilot digest authorized for its samples, reads
   both through private staging, and rechecks every referenced input at report publication.
 - Keep the project hardware-agnostic. Hardware-specific configuration belongs under

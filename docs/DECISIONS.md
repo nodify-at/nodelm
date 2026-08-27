@@ -290,3 +290,28 @@ Recovery may be reconsidered only as a separately versioned, pre-registered comp
 experiment whose selection is label-blind and whose admitted population is restricted to the
 same compatibility domain. The immutable blocked V1 artifacts remain evidence; they are not
 rewritten or discarded.
+
+## D-022 — oracle isolation requires raw-context review and two explicit trust promotions
+
+The four selected Open-SWE v1.0 leaves may produce
+`nodelm.oracle-isolation-attestation/v2` evidence only from their exact complete-partition raw
+materialization and replay-verified normalized artifact. The review indexes every normalized
+sample by its raw-row lineage, requires complete identity coverage, binds the complete task
+provenance projection used to derive repository, license, base commit, and language, and
+reproduces every training-visible trace value including resolution and derived patch metadata.
+It permits the source reference patch only at the reviewed `metadata.reference_patch` boundary,
+requires it for every reviewed row, and rejects it from every recorded model input (including tool
+results, tool definitions, and unknown roles) or any other raw location. Findings are fixed-code,
+content-free records.
+
+The upstream portion is deliberately narrow: only the exact pinned v1.0 OpenHands/SWE-agent and
+MiniMax/Qwen3.5 partitions are covered by the Open-SWE-Traces paper's post-hoc git-hacking review.
+This is evidence about the complete recorded context plus reviewed upstream curation, not a claim
+that NodeLM cryptographically reconstructed the producer's external model service.
+
+A structural `PASS` attestation is still a candidate. `audit-gold-exposure` reports oracle
+isolation `PASS` only when the attestation's exact SHA-256 is code-authorized for the exact
+normalized artifact. Pilot construction then independently requires the resulting complete
+gold-exposure audit digest to be code-authorized. Both authorization maps are empty until real
+artifacts are run, inspected, and deliberately promoted; a self-authored schema-valid JSON cannot
+cross either boundary.

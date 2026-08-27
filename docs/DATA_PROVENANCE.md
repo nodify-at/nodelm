@@ -59,8 +59,11 @@ The normalization flow is:
    authorized for the exact normalized artifact before pilot construction.
 10. Derive a pilot manifest and companion training JSONL only when the frozen split, normalization
    manifest, and reviewed/code-authorized `PASS` gold-exposure audit bind the same normalized bytes
-   and complete row count. Re-scan every training-visible trajectory, retain oracle-isolation
-   attestation identity, and never move repositories across the split. The one-step lifecycle
+   and complete row count. Before that audit can pass, review the exact raw materialization against
+   normalized raw-row lineage, model-visible context, initial prompts, and the pinned upstream
+   git-hacking review. A v2 oracle attestation becomes admissible only after its exact digest is
+   code-authorized for those normalized bytes. Re-scan every training-visible trajectory, retain
+   that attestation identity, and never move repositories across the split. The one-step lifecycle
    also requires a reviewed pilot-manifest digest authorized for the exact samples digest and
    consumes private identity-verified copies of both artifacts.
 

@@ -97,6 +97,17 @@ uv run nodelm datasets normalize \
   --expect-generating-model source-label:qwen36_27b \
   --output /workspace/nodelm/derived/canary/openhands-qwen36-v2.normalized.jsonl
 
+# Review a complete selected leaf against its exact raw rows. A PASS output is still pending
+# human/code digest authorization before it can make the gold-exposure audit PASS.
+uv run nodelm datasets review-oracle-isolation \
+  --raw-input /workspace/nodelm/derived/full/leaf.raw.jsonl \
+  --materialization-manifest /workspace/nodelm/derived/full/leaf.raw.manifest.json \
+  --input /workspace/nodelm/derived/full/leaf.normalized.jsonl \
+  --normalization-manifest /workspace/nodelm/derived/full/leaf.normalized.manifest.json \
+  --task-provenance /workspace/nodelm/derived/task-provenance/swe-rebench-v2.safe.jsonl \
+  --task-provenance-manifest /workspace/nodelm/derived/task-provenance/swe-rebench-v2.safe.manifest.json \
+  --output /workspace/nodelm/audits/leaf.oracle-isolation.json
+
 # Pilot construction is intentionally unavailable from normalization alone. It also requires a
 # reviewed/code-authorized frozen split bound to the same bytes and a reviewed, code-authorized
 # PASS gold-exposure audit with complete oracle-isolation coverage.

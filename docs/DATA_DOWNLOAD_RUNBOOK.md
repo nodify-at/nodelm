@@ -28,6 +28,40 @@ the hardened replay evidence is retained at
 The structural audit evidence is retained at
 `/workspace/nodelm/audits/gold-exposure-structural-24f4eb75f16f6782fdfa85762d3a27cd7fdbef10`.
 
+## Next CPU gate — oracle-isolation raw-context review
+
+The offline four-leaf runner is prepared but has not yet produced real evidence. It reads the
+existing full-normalization raw and normalized artifacts, uses local temporary storage for one
+private staged file at a time, and writes only compact attestations/findings under the persistent
+audit root. No download, GPU, model load, training, or paid inference is involved.
+
+After pulling the exact clean commit into `/workspace/nodelm/repo`, launch it detached:
+
+```bash
+cd /workspace/nodelm/repo
+git status --short
+nohup bash scripts/run_oracle_isolation_reviews.sh \
+  >/workspace/nodelm/logs/oracle-isolation-review.launch.log 2>&1 &
+```
+
+Monitor or stop it without keeping the SSH session open:
+
+```bash
+NODELM_RUN_COMMIT="$(git -C /workspace/nodelm/repo rev-parse HEAD)"
+NODELM_ORACLE_DIR="/workspace/nodelm/audits/oracle-isolation-review-${NODELM_RUN_COMMIT}"
+cat "${NODELM_ORACLE_DIR}/run.state"
+grep -c ' COMPLETE leaf=' "${NODELM_ORACLE_DIR}/events.log"
+tail -n 12 "${NODELM_ORACLE_DIR}/events.log"
+
+# Clean stop between leaves:
+touch "${NODELM_ORACLE_DIR}/STOP"
+# During an active leaf, use the PID recorded in run.state:
+kill -TERM "$(sed -n 's/^pid=//p' "${NODELM_ORACLE_DIR}/run.state")"
+```
+
+`COMPLETE` means four structural v2 reviews are `PASS` and still await exact digest review and
+code authorization. It does not yet authorize a gold-exposure audit, split, pilot, or training.
+
 ## Completed evidence and safeguards
 
 - All three dataset repositories and immutable revisions are pinned in

@@ -116,8 +116,10 @@ from nodelm.provenance.gold import (
     GoldExposureAudit,
     GoldExposureAuthorizationError,
     OracleIsolationAttestation,
+    OracleIsolationAuthorizationError,
     SanitizedGoldExposureFinding,
     require_authorized_gold_audit,
+    require_authorized_oracle_attestation,
 )
 from nodelm.provenance.manifests import (
     TASK_PROVENANCE_SAFE_FIELDS,
@@ -136,6 +138,10 @@ from nodelm.provenance.normalize import (
     NormalizationError,
     UnknownResolutionError,
     validate_gold_free_trajectory,
+)
+from nodelm.provenance.oracle_isolation import (
+    OracleIsolationReviewError,
+    review_oracle_isolation_artifacts,
 )
 from nodelm.provenance.pipeline import (
     normalization_evidence_lineage,
@@ -2526,6 +2532,215 @@ def datasets_build_normalization_cohort(
     )
 
 
+@datasets_app.command("review-oracle-isolation")
+def datasets_review_oracle_isolation(
+    raw_input: Path = typer.Option(..., "--raw-input", exists=True, dir_okay=False),
+    materialization_manifest: Path = typer.Option(
+        ..., "--materialization-manifest", exists=True, dir_okay=False
+    ),
+    normalized_input: Path = typer.Option(
+        ..., "--input", "--normalized", exists=True, dir_okay=False
+    ),
+    normalization_manifest: Path = typer.Option(
+        ..., "--normalization-manifest", exists=True, dir_okay=False
+    ),
+    task_provenance: Path = typer.Option(..., "--task-provenance", exists=True, dir_okay=False),
+    task_provenance_manifest: Path = typer.Option(
+        ..., "--task-provenance-manifest", exists=True, dir_okay=False
+    ),
+    output: Path = typer.Option(..., "--output", dir_okay=False),
+    findings_output: Path | None = typer.Option(None, "--findings-output", dir_okay=False),
+) -> None:
+    """Review recorded model context against exact raw and normalized populations."""
+
+    findings_path = findings_output or output.with_name(f"{output.stem}.findings.jsonl")
+    try:
+        result, attestation = review_oracle_isolation_artifacts(
+            raw_input=raw_input,
+            materialization_manifest=materialization_manifest,
+            normalized_input=normalized_input,
+            normalization_manifest=normalization_manifest,
+            task_provenance=task_provenance,
+            task_provenance_manifest=task_provenance_manifest,
+            output=output,
+            findings_output=findings_path,
+        )
+    except (OSError, OracleIsolationReviewError, ValidationError) as error:
+        raise typer.BadParameter(f"oracle-isolation review failed: {error}") from error
+    typer.echo(
+        f"wrote {result.path} status={attestation.status.value} "
+        f"covered={attestation.covered_sample_count}/"
+        f"{attestation.expected_sample_count} findings={attestation.finding_count} "
+        f"sha256={result.digest}"
+    )
+    if attestation.status is not VerificationStatus.PASS:
+        raise typer.Exit(code=1)
+
+
+def _oracle_attestation_matches_normalization(
+    attestation: OracleIsolationAttestation,
+    *,
+    normalization: NormalizationManifestV2,
+    normalization_identity: tuple[str, int],
+    normalized_identity: tuple[str, int],
+    expected_sample_count: int,
+) -> bool:
+    return (
+        attestation.source_name == normalization.source_name
+        and attestation.source_repository_id == normalization.source_repository_id
+        and attestation.source_revision == normalization.source_revision
+        and attestation.partition_name == normalization.partition_name
+        and attestation.harness == normalization.harness
+        and attestation.generating_model == normalization.generating_model
+        and attestation.materialization_manifest_sha256
+        == normalization.materialization_manifest_sha256
+        and attestation.materialization_manifest_bytes
+        == normalization.materialization_manifest_bytes
+        and attestation.raw_sha256 == normalization.input_sha256
+        and attestation.raw_bytes == normalization.input_bytes
+        and attestation.raw_row_count == normalization.input_row_count
+        and attestation.normalization_manifest_sha256 == normalization_identity[0]
+        and attestation.normalization_manifest_bytes == normalization_identity[1]
+        and attestation.normalized_sha256 == normalized_identity[0]
+        and attestation.normalized_bytes == normalized_identity[1]
+        and attestation.expected_sample_count == expected_sample_count
+        and attestation.covered_sample_count == expected_sample_count
+    )
+
+
+def _resolve_attestation_evidence_chain(
+    *,
+    attestation_path: Path,
+    attestation: OracleIsolationAttestation,
+    normalization_manifest: Path,
+    normalization: NormalizationManifestV2,
+    normalization_identity: tuple[str, int],
+    normalized_input: Path,
+    normalized_identity: tuple[str, int],
+) -> tuple[tuple[Path, tuple[str, int]], ...]:
+    """Resolve and bind the complete retained evidence chain behind a v2 PASS claim."""
+
+    def resolve(reference: Path, artifact: str) -> Path:
+        path = Path(artifact)
+        return path if path.is_absolute() else reference.resolve().parent / path
+
+    materialization_path = resolve(attestation_path, attestation.materialization_manifest_artifact)
+    raw_path = resolve(attestation_path, attestation.raw_artifact)
+    task_path = resolve(attestation_path, attestation.task_provenance_artifact)
+    task_manifest_path = resolve(attestation_path, attestation.task_provenance_manifest_artifact)
+    attestation_normalization_path = resolve(
+        attestation_path, attestation.normalization_manifest_artifact
+    )
+    attestation_normalized_path = resolve(attestation_path, attestation.normalized_artifact)
+    findings_path = resolve(attestation_path, attestation.findings_artifact)
+    try:
+        materialization_payload, materialization_identity = _read_json_mapping_with_identity(
+            materialization_path
+        )
+        task_manifest_payload, task_manifest_identity = _read_json_mapping_with_identity(
+            task_manifest_path
+        )
+        materialization = SnapshotMaterializationManifestV2.model_validate(materialization_payload)
+        task_manifest = TaskProvenanceProjectionManifestV1.model_validate(task_manifest_payload)
+        raw_identity = file_identity(raw_path)
+        task_identity = file_identity(task_path)
+        findings_identity = file_identity(findings_path)
+    except (OSError, ValidationError) as error:
+        raise typer.BadParameter(f"invalid oracle-isolation evidence artifact: {error}") from error
+
+    if (
+        attestation_normalization_path.resolve() != normalization_manifest.resolve()
+        or attestation_normalized_path.resolve() != normalized_input.resolve()
+        or materialization_identity
+        != (
+            attestation.materialization_manifest_sha256,
+            attestation.materialization_manifest_bytes,
+        )
+        or raw_identity != (attestation.raw_sha256, attestation.raw_bytes)
+        or task_identity != (attestation.task_provenance_sha256, attestation.task_provenance_bytes)
+        or task_manifest_identity
+        != (
+            attestation.task_provenance_manifest_sha256,
+            attestation.task_provenance_manifest_bytes,
+        )
+        or findings_identity != (attestation.findings_sha256, attestation.findings_bytes)
+        or not _oracle_attestation_matches_normalization(
+            attestation,
+            normalization=normalization,
+            normalization_identity=normalization_identity,
+            normalized_identity=normalized_identity,
+            expected_sample_count=normalization.accepted_count,
+        )
+    ):
+        raise typer.BadParameter("oracle-isolation attestation does not bind its evidence paths")
+
+    if (
+        materialization.status != VerificationStatus.PASS.value
+        or materialization.materialization_scope != "complete-partition"
+        or materialization.max_rows is not None
+        or resolve(materialization_path, materialization.output).resolve() != raw_path.resolve()
+        or (materialization.output_sha256, materialization.output_bytes) != raw_identity
+        or materialization.row_count != attestation.raw_row_count
+        or (normalization.input_sha256, normalization.input_bytes) != raw_identity
+        or normalization.input_row_count != materialization.row_count
+        or (
+            normalization.materialization_manifest_sha256,
+            normalization.materialization_manifest_bytes,
+        )
+        != materialization_identity
+    ):
+        raise typer.BadParameter("oracle-isolation raw materialization evidence is inconsistent")
+
+    shared_fields = (
+        "source_name",
+        "source_repository_id",
+        "source_revision",
+        "partition_name",
+        "harness",
+        "generating_model",
+        "upstream_source",
+        "row_dataset_name",
+        "task_source_name",
+        "task_source_revision",
+    )
+    if any(
+        getattr(materialization, field) != getattr(normalization, field) for field in shared_fields
+    ):
+        raise typer.BadParameter("oracle-isolation manifests describe different source leaves")
+
+    if (
+        task_manifest.status != VerificationStatus.PASS.value
+        or task_manifest.projection_scope != "complete-snapshot"
+        or task_manifest.file_patterns
+        or task_manifest.safe_fields != TASK_PROVENANCE_SAFE_FIELDS
+        or task_manifest.source_name != normalization.task_source_name
+        or task_manifest.source_revision.casefold() != normalization.task_source_revision.casefold()
+        or resolve(task_manifest_path, task_manifest.output).resolve() != task_path.resolve()
+        or (task_manifest.output_sha256, task_manifest.output_bytes) != task_identity
+        or (
+            normalization.task_provenance_sha256,
+            normalization.task_provenance_bytes,
+        )
+        != task_identity
+        or (
+            normalization.task_provenance_manifest_sha256,
+            normalization.task_provenance_manifest_bytes,
+        )
+        != task_manifest_identity
+    ):
+        raise typer.BadParameter("oracle-isolation task provenance evidence is inconsistent")
+
+    return (
+        (raw_path, raw_identity),
+        (materialization_path, materialization_identity),
+        (task_path, task_identity),
+        (task_manifest_path, task_manifest_identity),
+        (normalization_manifest, normalization_identity),
+        (normalized_input, normalized_identity),
+        (findings_path, findings_identity),
+    )
+
+
 @datasets_app.command("audit-gold-exposure")
 def datasets_audit_gold_exposure(
     input_path: Path = typer.Option(..., "--input", "--normalized", exists=True, dir_okay=False),
@@ -2585,6 +2800,8 @@ def datasets_audit_gold_exposure(
 
     attestation: OracleIsolationAttestation | None = None
     attestation_identity: tuple[str, int] | None = None
+    attestation_authorized = False
+    attestation_evidence: tuple[tuple[Path, tuple[str, int]], ...] = ()
     if oracle_isolation_attestation is not None:
         attestation_payload, attestation_identity = _read_json_mapping_with_identity(
             oracle_isolation_attestation
@@ -2593,31 +2810,49 @@ def datasets_audit_gold_exposure(
             attestation = OracleIsolationAttestation.model_validate(attestation_payload)
         except ValidationError as error:
             raise typer.BadParameter("invalid oracle-isolation attestation") from error
-        if (
-            attestation.source_name != normalization.source_name
-            or attestation.source_revision != normalization.source_revision
-            or attestation.partition_name != normalization.partition_name
-            or attestation.normalized_sha256 != input_identity[0]
-            or attestation.normalized_bytes != input_identity[1]
-            or attestation.covered_sample_count != normalization.accepted_count
+        if attestation.status is not VerificationStatus.PASS:
+            raise typer.BadParameter("oracle-isolation attestation is not PASS")
+        if not _oracle_attestation_matches_normalization(
+            attestation,
+            normalization=normalization,
+            normalization_identity=normalization_identity,
+            normalized_identity=input_identity,
+            expected_sample_count=normalization.accepted_count,
         ):
             raise typer.BadParameter("oracle-isolation attestation coverage is inconsistent")
+        try:
+            require_authorized_oracle_attestation(
+                normalized_sha256=input_identity[0],
+                attestation_sha256=attestation_identity[0],
+            )
+        except OracleIsolationAuthorizationError:
+            pass
+        else:
+            attestation_authorized = True
+            attestation_evidence = _resolve_attestation_evidence_chain(
+                attestation_path=oracle_isolation_attestation,
+                attestation=attestation,
+                normalization_manifest=normalization_manifest,
+                normalization=normalization,
+                normalization_identity=normalization_identity,
+                normalized_input=input_path,
+                normalized_identity=input_identity,
+            )
 
-    staged_inputs: list[tuple[Path, tuple[str, int]]] = [
+    captured_inputs: list[tuple[Path, tuple[str, int]]] = [
         (normalization_manifest, normalization_identity),
         (input_path, input_identity),
     ]
     if oracle_isolation_attestation is not None and attestation_identity is not None:
-        staged_inputs.append((oracle_isolation_attestation, attestation_identity))
+        captured_inputs.append((oracle_isolation_attestation, attestation_identity))
+    captured_inputs.extend(attestation_evidence)
+    staged_inputs = list(
+        {path.resolve(): (path, identity) for path, identity in captured_inputs}.values()
+    )
 
     def verify_inputs() -> None:
-        _require_unchanged_file(normalization_manifest, normalization_identity)
-        _require_unchanged_file(input_path, input_identity)
-        if oracle_isolation_attestation is not None and attestation_identity is not None:
-            _require_unchanged_file(
-                oracle_isolation_attestation,
-                attestation_identity,
-            )
+        for path, identity in staged_inputs:
+            _require_unchanged_file(path, identity)
 
     audited_sample_count = 0
     finding_count = 0
@@ -2695,12 +2930,16 @@ def datasets_audit_gold_exposure(
         or normalization.status != VerificationStatus.PASS.value
     ):
         overall_status = VerificationStatus.FAIL
-    elif normalization.uniqueness_scope != "complete-partition" or attestation is None:
+    elif (
+        normalization.uniqueness_scope != "complete-partition"
+        or attestation is None
+        or not attestation_authorized
+    ):
         overall_status = VerificationStatus.BLOCKED
     else:
         overall_status = VerificationStatus.PASS
 
-    if attestation is None or attestation_identity is None:
+    if attestation is None or attestation_identity is None or not attestation_authorized:
         oracle_evidence: dict[str, object] = {
             "status": VerificationStatus.BLOCKED.value,
             "attestation_artifact": None,
@@ -2889,32 +3128,63 @@ def datasets_build_pilot(
         attestation = OracleIsolationAttestation.model_validate(attestation_payload)
     except (OSError, ValidationError) as error:
         raise typer.BadParameter(f"invalid gold-exposure evidence artifact: {error}") from error
+    if attestation.status is not VerificationStatus.PASS:
+        raise typer.BadParameter("oracle-isolation attestation is not PASS")
     if (
         findings_identity != (audit.findings_sha256, audit.findings_bytes)
         or findings_identity[1] != 0
     ):
         raise typer.BadParameter("PASS structural gold scan requires an empty bound findings file")
+    oracle_findings_path = Path(attestation.findings_artifact)
+    if not oracle_findings_path.is_absolute():
+        oracle_findings_path = attestation_path.resolve().parent / oracle_findings_path
+    try:
+        oracle_findings_identity = file_identity(oracle_findings_path)
+    except OSError as error:
+        raise typer.BadParameter(f"invalid oracle-isolation findings artifact: {error}") from error
     if (
         attestation_identity
         != (
             audit.oracle_isolation.attestation_sha256,
             audit.oracle_isolation.attestation_bytes,
         )
-        or attestation.normalized_sha256 != input_identity[0]
-        or attestation.normalized_bytes != input_identity[1]
-        or attestation.covered_sample_count != normalized_count
-        or attestation.source_name != normalization.source_name
-        or attestation.source_revision != normalization.source_revision
-        or attestation.partition_name != normalization.partition_name
+        or oracle_findings_identity != (attestation.findings_sha256, attestation.findings_bytes)
+        or not _oracle_attestation_matches_normalization(
+            attestation,
+            normalization=normalization,
+            normalization_identity=normalization_identity,
+            normalized_identity=input_identity,
+            expected_sample_count=normalized_count,
+        )
     ):
         raise typer.BadParameter("oracle-isolation attestation coverage is inconsistent")
+    attestation_evidence = _resolve_attestation_evidence_chain(
+        attestation_path=attestation_path,
+        attestation=attestation,
+        normalization_manifest=normalization_manifest,
+        normalization=normalization,
+        normalization_identity=normalization_identity,
+        normalized_input=input_path,
+        normalized_identity=input_identity,
+    )
+
+    captured_pilot_evidence = [
+        (input_path, input_identity),
+        (split_manifest, split_identity),
+        (normalization_manifest, normalization_identity),
+        (gold_exposure_audit, audit_identity),
+        (findings_path, findings_identity),
+        (attestation_path, attestation_identity),
+        *attestation_evidence,
+    ]
+    staged_pilot_sources = list(
+        {path.resolve(): (path, identity) for path, identity in captured_pilot_evidence}.values()
+    )
 
     sample_count = 0
     try:
-        with verified_staged_files(
-            ((input_path, input_identity), (split_manifest, split_identity))
-        ) as staged_pilot_inputs:
-            split_evidence = read_repository_split_evidence(staged_pilot_inputs[1])
+        with verified_staged_files(tuple(staged_pilot_sources)) as staged_pilot_files:
+            split_evidence = read_repository_split_evidence(staged_pilot_files[1])
             if (
                 split_evidence.input_sha256 != input_identity[0]
                 or split_evidence.input_bytes != input_identity[1]
@@ -2924,7 +3194,7 @@ def datasets_build_pilot(
 
             def validated_samples() -> Iterator[NormalizedSample]:
                 nonlocal sample_count
-                for row in _read_jsonl(staged_pilot_inputs[0]):
+                for row in _read_jsonl(staged_pilot_files[0]):
                     sample = NormalizedSample.model_validate(row)
                     validate_gold_free_trajectory(sample.trajectory)
                     source = verified_sources.get(sample.source_dataset)
@@ -2968,14 +3238,10 @@ def datasets_build_pilot(
         raise typer.BadParameter("normalized sample count does not match safety evidence")
 
     def verify_inputs() -> None:
-        _require_unchanged_file(input_path, input_identity)
         _require_unchanged_file(policy_config, policy_identity)
         _require_unchanged_file(registry_config, registry_identity)
-        _require_unchanged_file(split_manifest, split_identity)
-        _require_unchanged_file(normalization_manifest, normalization_identity)
-        _require_unchanged_file(gold_exposure_audit, audit_identity)
-        _require_unchanged_file(findings_path, findings_identity)
-        _require_unchanged_file(attestation_path, attestation_identity)
+        for path, identity in staged_pilot_sources:
+            _require_unchanged_file(path, identity)
 
     verify_inputs()
     samples_path = samples_output or output.with_name(f"{output.stem}.samples.jsonl")

@@ -20,7 +20,10 @@ from nodelm.decontamination.split import AUTHORIZED_SPLIT_SHA256_BY_NORMALIZED_S
 from nodelm.evaluation.fixture import MODEL_TASK_FIXTURE_IDENTITY
 from nodelm.harness import CommandResult, OutcomeCategory
 from nodelm.models import NormalizedSample
-from nodelm.provenance.gold import AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256
+from nodelm.provenance.gold import (
+    AUTHORIZED_GOLD_AUDIT_SHA256_BY_NORMALIZED_SHA256,
+    AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256,
+)
 
 
 def _write_pilot_safety_evidence(
@@ -35,6 +38,85 @@ def _write_pilot_safety_evidence(
     uniqueness_scope: str = "complete-partition",
 ) -> tuple[Path, Path]:
     input_identity = file_identity(input_path)
+    raw = tmp_path / "raw.jsonl"
+    raw.write_bytes(b"{}\n" * sample_count)
+    raw_identity = file_identity(raw)
+    task_provenance = tmp_path / "tasks.safe.jsonl"
+    task_provenance.write_bytes(b"{}\n" * sample_count)
+    task_identity = file_identity(task_provenance)
+    task_manifest = tmp_path / "tasks.safe.manifest.json"
+    task_manifest.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.task-provenance-projection/v1",
+                "status": "PASS",
+                "source_name": "fixture-tasks",
+                "source_repository_id": "owner/fixture-tasks",
+                "source_revision": "c" * 40,
+                "registry_sha256": "1" * 64,
+                "registry_bytes": 1,
+                "transfer_receipt_sha256": "2" * 64,
+                "transfer_receipt_bytes": 1,
+                "snapshot_sha256": "3" * 64,
+                "file_patterns": [],
+                "files": [{"path": "tasks.jsonl", "sha256": "4" * 64, "bytes": 1}],
+                "projection_scope": "complete-snapshot",
+                "safe_fields": [
+                    "instance_id",
+                    "repository",
+                    "base_commit",
+                    "repository_license",
+                    "language",
+                    "source_dataset",
+                    "source_dataset_revision",
+                ],
+                "admitted_count": sample_count,
+                "rejected_count": 0,
+                "rejection_counts_by_code": {},
+                "output": task_provenance.name,
+                "output_sha256": task_identity[0],
+                "output_bytes": task_identity[1],
+                "rejection_artifact": "tasks.rejections.jsonl",
+                "rejection_sha256": "5" * 64,
+                "rejection_bytes": 0,
+            }
+        )
+    )
+    task_manifest_identity = file_identity(task_manifest)
+    materialization_manifest = tmp_path / "raw.manifest.json"
+    materialization_manifest.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "nodelm.snapshot-materialization/v2",
+                "status": "PASS",
+                "source_name": source_name,
+                "source_repository_id": f"owner/{source_name}",
+                "source_revision": source_revision,
+                "registry_sha256": "1" * 64,
+                "file_patterns": [],
+                "files": [{"path": "raw.jsonl", "sha256": "2" * 64, "bytes": 1}],
+                "row_count": sample_count,
+                "max_rows": None,
+                "output": raw.name,
+                "output_sha256": raw_identity[0],
+                "output_bytes": raw_identity[1],
+                "materialization_scope": "complete-partition",
+                "partition_contract_sha256": "3" * 64,
+                "partition_contract_bytes": 1,
+                "transfer_receipt_sha256": "4" * 64,
+                "transfer_receipt_bytes": 1,
+                "partition_name": partition_name,
+                "harness": "fixture",
+                "generating_model": "fixture@revision",
+                "upstream_source": "tasks",
+                "row_dataset_name": "owner/fixture-tasks",
+                "task_source_name": "fixture-tasks",
+                "task_source_revision": "c" * 40,
+                "normalization_status": "PASS",
+            }
+        )
+    )
+    materialization_identity = file_identity(materialization_manifest)
     normalization_manifest = tmp_path / "normalized.manifest.json"
     normalization_manifest.write_bytes(
         canonical_json_bytes(
@@ -49,19 +131,19 @@ def _write_pilot_safety_evidence(
                 "generating_model": "fixture@revision",
                 "upstream_source": "tasks",
                 "row_dataset_name": "owner/fixture-tasks",
-                "input_sha256": "1" * 64,
-                "input_bytes": 1,
+                "input_sha256": raw_identity[0],
+                "input_bytes": raw_identity[1],
                 "registry_sha256": "2" * 64,
-                "materialization_manifest_sha256": "3" * 64,
-                "materialization_manifest_bytes": 1,
+                "materialization_manifest_sha256": materialization_identity[0],
+                "materialization_manifest_bytes": materialization_identity[1],
                 "partition_contract_sha256": "4" * 64,
                 "partition_contract_bytes": 1,
                 "transfer_receipt_sha256": "5" * 64,
                 "transfer_receipt_bytes": 1,
-                "task_provenance_sha256": "6" * 64,
-                "task_provenance_bytes": 1,
-                "task_provenance_manifest_sha256": "7" * 64,
-                "task_provenance_manifest_bytes": 1,
+                "task_provenance_sha256": task_identity[0],
+                "task_provenance_bytes": task_identity[1],
+                "task_provenance_manifest_sha256": task_manifest_identity[0],
+                "task_provenance_manifest_bytes": task_manifest_identity[1],
                 "task_transfer_receipt_sha256": "8" * 64,
                 "task_transfer_receipt_bytes": 1,
                 "task_source_name": "fixture-tasks",
@@ -87,27 +169,70 @@ def _write_pilot_safety_evidence(
             }
         )
     )
+    normalization_identity = file_identity(normalization_manifest)
     findings = tmp_path / "gold.findings.jsonl"
     findings.write_bytes(b"")
+    oracle_findings = tmp_path / "oracle.findings.jsonl"
+    oracle_findings.write_bytes(b"")
+    oracle_findings_identity = file_identity(oracle_findings)
     attestation = tmp_path / "oracle-isolation.json"
     attestation.write_bytes(
         canonical_json_bytes(
             {
-                "schema_version": "nodelm.oracle-isolation-attestation/v1",
-                "method_version": "nodelm.oracle-isolation-review/v1",
+                "schema_version": "nodelm.oracle-isolation-attestation/v2",
+                "method_version": "nodelm.oracle-isolation-recorded-context-review/v2",
                 "status": "PASS",
+                "review_scope": "recorded-model-context-and-upstream-curation",
+                "upstream_review_id": ("open-swe-traces-v1.0-paper-git-hacking-review/v1"),
                 "source_name": source_name,
+                "source_repository_id": f"owner/{source_name}",
                 "source_revision": source_revision,
                 "partition_name": partition_name,
+                "harness": "fixture",
+                "generating_model": "fixture@revision",
+                "materialization_manifest_artifact": materialization_manifest.name,
+                "materialization_manifest_sha256": materialization_identity[0],
+                "materialization_manifest_bytes": materialization_identity[1],
+                "raw_artifact": raw.name,
+                "raw_sha256": raw_identity[0],
+                "raw_bytes": raw_identity[1],
+                "raw_row_count": sample_count,
+                "task_provenance_artifact": task_provenance.name,
+                "task_provenance_sha256": task_identity[0],
+                "task_provenance_bytes": task_identity[1],
+                "task_provenance_manifest_artifact": task_manifest.name,
+                "task_provenance_manifest_sha256": task_manifest_identity[0],
+                "task_provenance_manifest_bytes": task_manifest_identity[1],
+                "normalization_manifest_artifact": normalization_manifest.name,
+                "normalization_manifest_sha256": normalization_identity[0],
+                "normalization_manifest_bytes": normalization_identity[1],
+                "normalized_artifact": input_path.name,
                 "normalized_sha256": input_identity[0],
                 "normalized_bytes": input_identity[1],
+                "expected_sample_count": sample_count,
                 "covered_sample_count": sample_count,
+                "reference_patch_row_count": sample_count,
+                "checks": [
+                    {"name": "raw-normalized-population-binding", "status": "PASS"},
+                    {"name": "recorded-model-context-boundary", "status": "PASS"},
+                    {"name": "recorded-model-input-gold-absence", "status": "PASS"},
+                    {"name": "reference-patch-coverage", "status": "PASS"},
+                    {"name": "upstream-git-hacking-review", "status": "PASS"},
+                ],
+                "findings_artifact": oracle_findings.name,
+                "findings_sha256": oracle_findings_identity[0],
+                "findings_bytes": oracle_findings_identity[1],
+                "finding_count": 0,
             }
         )
     )
-    normalization_identity = file_identity(normalization_manifest)
     findings_identity = file_identity(findings)
     attestation_identity = file_identity(attestation)
+    monkeypatch.setitem(
+        AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256,
+        input_identity[0],
+        attestation_identity[0],
+    )
     audit = tmp_path / "gold-exposure.audit.json"
     audit.write_bytes(
         canonical_json_bytes(
@@ -1314,6 +1439,31 @@ def test_gold_audit_command_passes_complete_population_with_reviewed_attestation
     assert findings.read_bytes() == b""
 
 
+def test_gold_audit_command_blocks_a_structurally_valid_unreviewed_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256.pop(file_identity(normalized)[0])
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(audit.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["structural_scan"] == {"status": "PASS", "finding_count": 0}
+    assert payload["oracle_isolation"]["status"] == "BLOCKED"
+
+
 def test_gold_audit_command_blocks_without_oracle_attestation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1747,4 +1897,57 @@ def test_gold_audit_command_rechecks_inputs_at_audit_publication(
     assert result.exit_code == 2
     assert "input changed while it was being processed" in result.output
     assert findings.exists()
+    assert not audit.exists()
+
+
+def test_gold_audit_rejects_deleted_transitive_oracle_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    (tmp_path / "raw.jsonl").unlink()
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert "oracle-isolation evidence artifact" in result.output
+    assert not audit.exists()
+
+
+def test_gold_audit_rejects_attestation_artifact_path_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    normalized, manifest, attestation, audit, findings = _gold_audit_command_inputs(
+        tmp_path,
+        monkeypatch,
+    )
+    payload = json.loads(attestation.read_text(encoding="utf-8"))
+    payload["raw_artifact"] = "tasks.safe.jsonl"
+    attestation.write_bytes(canonical_json_bytes(payload))
+    monkeypatch.setitem(
+        AUTHORIZED_ORACLE_ATTESTATION_SHA256_BY_NORMALIZED_SHA256,
+        file_identity(normalized)[0],
+        file_identity(attestation)[0],
+    )
+
+    result = _invoke_gold_audit(
+        normalized,
+        manifest,
+        audit,
+        findings,
+        attestation=attestation,
+    )
+
+    assert result.exit_code == 2
+    assert "oracle-isolation" in result.output
     assert not audit.exists()

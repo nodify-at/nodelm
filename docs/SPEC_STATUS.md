@@ -84,6 +84,10 @@ count, and all four findings ledgers are empty. No oracle-isolation attestation 
 all four oracle components and overall gold-exposure audits remain `BLOCKED`. This is the expected
 fail-closed boundary, not a failed structural scan or gold authorization.
 
+The v2 raw-context review and detached four-leaf CPU runner are now implemented, but no real v2
+attestation has run or been authorized yet. The status therefore remains `BLOCKED`; implementation
+readiness is not terminal evidence.
+
 ## Still open by design
 
 - the winning student, precision, inference backend, and training framework;
