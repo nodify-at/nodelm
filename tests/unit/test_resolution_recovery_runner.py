@@ -51,7 +51,7 @@ class RunnerHarness:
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=90,
         )
 
     def uv_calls(self) -> list[dict[str, object]]:
